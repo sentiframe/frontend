@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
@@ -22,6 +22,29 @@ const EMOTION_COLORS = {
   Neutral: "#6B7280",
 };
 
+// Custom pulsing dot component
+const PulsingDot = ({ cx, cy, fill }: { cx: number; cy: number; fill: string }) => {
+  return (
+    <g>
+      <circle
+        cx={cx}
+        cy={cy}
+        r={4}
+        fill={fill}
+        className="animate-pulse"
+      />
+      <circle
+        cx={cx}
+        cy={cy}
+        r={8}
+        fill={fill}
+        opacity={0.3}
+        className="animate-ping"
+      />
+    </g>
+  );
+};
+
 export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionProps) {
   const [emotionData, setEmotionData] = useState<EmotionDataPoint[]>([]);
   const [criticalMoments, setCriticalMoments] = useState<CriticalMomentType[]>([]);
@@ -29,6 +52,22 @@ export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionP
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
   const [selectedEmotion, setSelectedEmotion] = useState<EmotionType>("Happy");
   const [isRecording, setIsRecording] = useState(true);
+
+  // Calculate dynamic x-axis domain based on elapsed time
+  const xAxisDomain = useMemo(() => {
+    const maxTime = Math.max(currentFrame, 10);
+    
+    if (maxTime <= 10) {
+      return [0, 10]; // First 10 seconds: show 0-10s
+    } else if (maxTime <= 30) {
+      return [0, 30]; // 10-30 seconds: expand to 30s
+    } else if (maxTime <= 60) {
+      return [0, 60]; // 30-60 seconds: expand to 1 minute
+    } else {
+      // Beyond 60 seconds: show last minute with some padding
+      return [Math.max(0, maxTime - 60), maxTime + 10];
+    }
+  }, [currentFrame]);
 
   // Poll Firebase every second for new frame data
   useEffect(() => {
@@ -184,7 +223,7 @@ export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionP
                   <XAxis
                     type="number"
                     dataKey="time"
-                    domain={[0, Math.max(currentFrame, 100)]}
+                    domain={xAxisDomain}
                     stroke="#94a3b8"
                     style={{ fontSize: "12px" }}
                     tickFormatter={(value) => `${value}s`}
@@ -220,13 +259,90 @@ export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionP
                   
                   {selectedEmotion === "All" ? (
                     <>
-                      <Line type="monotone" dataKey="Happy" stroke={EMOTION_COLORS.Happy} strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="Sad" stroke={EMOTION_COLORS.Sad} strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="Angry" stroke={EMOTION_COLORS.Angry} strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="Fear" stroke={EMOTION_COLORS.Fear} strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="Surprise" stroke={EMOTION_COLORS.Surprise} strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="Disgust" stroke={EMOTION_COLORS.Disgust} strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="Neutral" stroke={EMOTION_COLORS.Neutral} strokeWidth={2} dot={false} />
+                      <Line 
+                        type="monotone" 
+                        dataKey="Happy" 
+                        stroke={EMOTION_COLORS.Happy} 
+                        strokeWidth={2} 
+                        dot={(props: any) => {
+                          if (props.index === emotionData.length - 1 && isRecording) {
+                            return <PulsingDot {...props} fill={EMOTION_COLORS.Happy} />;
+                          }
+                          return <></>;
+                        }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="Sad" 
+                        stroke={EMOTION_COLORS.Sad} 
+                        strokeWidth={2} 
+                        dot={(props: any) => {
+                          if (props.index === emotionData.length - 1 && isRecording) {
+                            return <PulsingDot {...props} fill={EMOTION_COLORS.Sad} />;
+                          }
+                          return <></>;
+                        }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="Angry" 
+                        stroke={EMOTION_COLORS.Angry} 
+                        strokeWidth={2} 
+                        dot={(props: any) => {
+                          if (props.index === emotionData.length - 1 && isRecording) {
+                            return <PulsingDot {...props} fill={EMOTION_COLORS.Angry} />;
+                          }
+                          return <></>;
+                        }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="Fear" 
+                        stroke={EMOTION_COLORS.Fear} 
+                        strokeWidth={2} 
+                        dot={(props: any) => {
+                          if (props.index === emotionData.length - 1 && isRecording) {
+                            return <PulsingDot {...props} fill={EMOTION_COLORS.Fear} />;
+                          }
+                          return <></>;
+                        }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="Surprise" 
+                        stroke={EMOTION_COLORS.Surprise} 
+                        strokeWidth={2} 
+                        dot={(props: any) => {
+                          if (props.index === emotionData.length - 1 && isRecording) {
+                            return <PulsingDot {...props} fill={EMOTION_COLORS.Surprise} />;
+                          }
+                          return <></>;
+                        }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="Disgust" 
+                        stroke={EMOTION_COLORS.Disgust} 
+                        strokeWidth={2} 
+                        dot={(props: any) => {
+                          if (props.index === emotionData.length - 1 && isRecording) {
+                            return <PulsingDot {...props} fill={EMOTION_COLORS.Disgust} />;
+                          }
+                          return <></>;
+                        }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="Neutral" 
+                        stroke={EMOTION_COLORS.Neutral} 
+                        strokeWidth={2} 
+                        dot={(props: any) => {
+                          if (props.index === emotionData.length - 1 && isRecording) {
+                            return <PulsingDot {...props} fill={EMOTION_COLORS.Neutral} />;
+                          }
+                          return <></>;
+                        }}
+                      />
                     </>
                   ) : (
                     <Line
@@ -234,7 +350,12 @@ export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionP
                       dataKey={selectedEmotion}
                       stroke={EMOTION_COLORS[selectedEmotion]}
                       strokeWidth={2}
-                      dot={false}
+                      dot={(props: any) => {
+                        if (props.index === emotionData.length - 1 && isRecording) {
+                          return <PulsingDot {...props} fill={EMOTION_COLORS[selectedEmotion]} />;
+                        }
+                        return <></>;
+                      }}
                     />
                   )}
                 </LineChart>
