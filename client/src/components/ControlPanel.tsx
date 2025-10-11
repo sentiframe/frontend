@@ -18,8 +18,8 @@ export default function ControlPanel({ isRecording, onStartSession, onEndSession
   };
 
   return (
-    <Card className="shadow-sm">
-      <CardContent className="p-4">
+    <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
+      <CardContent className="p-6">
         <div className="flex items-center gap-4 flex-wrap">
           {!isRecording ? (
             <Button 

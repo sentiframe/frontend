@@ -22,7 +22,7 @@ export default function SessionReport({ summary, suggestions, stats }: SessionRe
 
   return (
     <div className="space-y-6">
-      <Card className="shadow-sm bg-gradient-to-br from-primary/10 via-primary/5 to-background border-primary/20">
+      <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm bg-gradient-to-br from-primary/10 via-primary/5 to-background dark:to-background border-primary/20">
         <CardHeader>
           <div className="flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-primary" />
@@ -35,46 +35,46 @@ export default function SessionReport({ summary, suggestions, stats }: SessionRe
       </Card>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card className="shadow-sm">
+        <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
           <CardContent className="p-6">
             <div className="text-sm text-muted-foreground mb-1">Duration</div>
-            <div className="text-2xl font-bold font-mono" data-testid="text-duration">
+            <div className="text-3xl font-normal" data-testid="text-duration">
               {formatDuration(stats.totalDuration)}
             </div>
           </CardContent>
         </Card>
 
-        <Card className="shadow-sm">
+        <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
           <CardContent className="p-6">
             <div className="text-sm text-muted-foreground mb-1">Emotion Switches</div>
-            <div className="text-2xl font-bold" data-testid="text-switches">
+            <div className="text-3xl font-normal" data-testid="text-switches">
               {stats.emotionSwitches}
             </div>
           </CardContent>
         </Card>
 
-        <Card className="shadow-sm">
+        <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
           <CardContent className="p-6">
             <div className="text-sm text-muted-foreground mb-1">Dominant Emotion</div>
-            <div className="text-2xl font-bold" data-testid="text-dominant">
+            <div className="text-3xl font-normal" data-testid="text-dominant">
               {stats.dominantEmotion}
             </div>
           </CardContent>
         </Card>
 
-        <Card className="shadow-sm">
+        <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
           <CardContent className="p-6">
             <div className="text-sm text-muted-foreground mb-1">Dominance %</div>
-            <div className="text-2xl font-bold" data-testid="text-percentage">
+            <div className="text-3xl font-normal" data-testid="text-percentage">
               {stats.dominantPercentage}%
             </div>
           </CardContent>
         </Card>
       </div>
 
-      <Card className="shadow-sm">
+      <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
         <CardHeader>
-          <CardTitle className="text-base">Suggestions for Improvement</CardTitle>
+          <CardTitle className="text-lg font-medium">Suggestions for Improvement</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-2" data-testid="list-suggestions">

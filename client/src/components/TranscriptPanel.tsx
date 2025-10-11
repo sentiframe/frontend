@@ -14,9 +14,9 @@ interface TranscriptPanelProps {
 
 export default function TranscriptPanel({ segments, currentTime, onSeek }: TranscriptPanelProps) {
   return (
-    <Card className="shadow-sm h-full">
+    <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm h-full">
       <CardHeader>
-        <CardTitle className="text-base">Transcript</CardTitle>
+        <CardTitle className="text-lg font-medium">Full Transcript</CardTitle>
       </CardHeader>
       <CardContent className="p-0">
         <ScrollArea className="h-[400px] px-6 pb-4" data-testid="scroll-transcript">

@@ -175,19 +175,19 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-background">
-      <div className="bg-gradient-to-r from-primary via-primary/90 to-primary/80 text-primary-foreground shadow-md">
-        <div className="max-w-7xl mx-auto px-6 py-6">
+    <div className="min-h-screen bg-white dark:bg-background">
+      <div className="border-b border-gray-200 dark:border-border bg-white dark:bg-background">
+        <div className="max-w-7xl mx-auto px-8 py-6">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div>
-              <h1 className="text-3xl font-bold tracking-tight">Emotion Analysis Dashboard</h1>
-              <p className="text-sm opacity-90 mt-1">Real-time speech emotion tracking and analysis</p>
+              <h1 className="text-2xl font-semibold tracking-tight text-gray-900 dark:text-foreground">Emotion Analysis Dashboard</h1>
+              <p className="text-sm text-gray-600 dark:text-muted-foreground mt-1">Real-time speech emotion tracking and analysis</p>
             </div>
           </div>
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-6 py-8 space-y-6">
+      <div className="max-w-7xl mx-auto px-8 py-12 space-y-8">
         <ControlPanel 
           isRecording={isRecording}
           onStartSession={handleStartSession}

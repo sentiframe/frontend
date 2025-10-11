@@ -16,9 +16,9 @@ interface CriticalMomentsProps {
 
 export default function CriticalMoments({ moments, onSeek, currentTime }: CriticalMomentsProps) {
   return (
-    <Card className="shadow-sm">
+    <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
       <CardHeader>
-        <CardTitle className="text-base">Critical Moments ({moments.length})</CardTitle>
+        <CardTitle className="text-lg font-medium">Critical Moments ({moments.length})</CardTitle>
       </CardHeader>
       <CardContent>
         {moments.length === 0 ? (

@@ -18,9 +18,9 @@ const EMOTION_COLORS_BG = {
 
 export default function EmotionEvaluationBar({ dominantEmotion, dominantValue, time }: EmotionEvaluationBarProps) {
   return (
-    <Card className="shadow-sm">
+    <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
       <CardHeader>
-        <CardTitle className="text-base">Current State @ {time}s</CardTitle>
+        <CardTitle className="text-lg font-medium">Current State @ {time}s</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="flex items-end gap-6">

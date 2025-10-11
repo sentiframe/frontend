@@ -20,12 +20,12 @@ interface EmotionChartProps {
 
 export default function EmotionChart({ data, selectedEmotions, criticalMoments = [], currentTime }: EmotionChartProps) {
   return (
-    <Card className="shadow-sm">
+    <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
       <CardHeader>
-        <CardTitle className="text-base">Emotion Timeline (0-1 Scale)</CardTitle>
+        <CardTitle className="text-lg font-medium">Emotion Timeline (0-1 Scale)</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="h-96 w-full" data-testid="chart-emotion-timeline">
+        <div className="h-80 w-full" data-testid="chart-emotion-timeline">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={data} margin={{ top: 10, right: 12, left: -20, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" opacity={0.15} />

@@ -16,9 +16,9 @@ interface UserSelectorProps {
 
 export default function UserSelector({ users, selectedUser, onSelectUser }: UserSelectorProps) {
   return (
-    <Card className="shadow-sm">
+    <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
       <CardHeader>
-        <CardTitle className="text-base">Select Speaker</CardTitle>
+        <CardTitle className="text-lg font-medium">Select Speaker</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="flex flex-wrap gap-2" data-testid="user-selector">

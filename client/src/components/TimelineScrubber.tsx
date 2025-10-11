@@ -16,9 +16,9 @@ export default function TimelineScrubber({ currentTime, maxTime, onSeek, dominan
   };
 
   return (
-    <Card className="shadow-sm">
+    <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
       <CardHeader>
-        <CardTitle className="text-base flex items-center justify-between">
+        <CardTitle className="text-lg font-medium flex items-center justify-between">
           <span>Timeline</span>
           <div className="text-sm font-mono text-muted-foreground">
             {formatTime(currentTime)} / {formatTime(maxTime)}
