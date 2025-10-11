@@ -71,4 +71,34 @@ export async function getAllFrames(videoId: string): Promise<{ frameNumber: numb
   }
 }
 
+export interface VideoMetadata {
+  id: string;
+  name?: string;
+  description?: string;
+  frameCount?: number;
+}
+
+export async function getAllVideos(): Promise<VideoMetadata[]> {
+  try {
+    const videosCollectionRef = collection(db, "videos");
+    const videosSnap = await getDocs(videosCollectionRef);
+    
+    const videos: VideoMetadata[] = [];
+    videosSnap.forEach((docSnap) => {
+      const data = docSnap.data();
+      videos.push({
+        id: docSnap.id,
+        name: data.name || docSnap.id,
+        description: data.description,
+        frameCount: data.frameCount,
+      });
+    });
+
+    return videos;
+  } catch (error) {
+    console.error("Error fetching videos:", error);
+    return [];
+  }
+}
+
 export { db };

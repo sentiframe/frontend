@@ -1,11 +1,22 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { getFrame, getAllFrames, type EmotionScores } from "./firebase";
+import { getFrame, getAllFrames, getAllVideos, type EmotionScores } from "./firebase";
 import { generateEmotionReport, type EmotionFrameData } from "./gemini";
 import { InsertSessionSchema, type EmotionDataPoint, type CriticalMomentType } from "@shared/schema";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Get all videos from Firebase
+  app.get("/api/videos", async (req, res) => {
+    try {
+      const videos = await getAllVideos();
+      res.json(videos);
+    } catch (error) {
+      console.error("Error fetching videos:", error);
+      res.status(500).json({ error: "Failed to fetch videos" });
+    }
+  });
+
   // Get a specific frame from Firebase
   app.get("/api/frames/:videoId/:frameNumber", async (req, res) => {
     try {
