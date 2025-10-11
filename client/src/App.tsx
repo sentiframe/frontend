@@ -84,7 +84,20 @@ function MainApp() {
         }
 
         // Fetch videos from Firebase
-        const videos = await fetch("/api/videos").then(res => res.json()) as VideoMetadata[];
+        const videosRes = await fetch("/api/videos");
+        if (!videosRes.ok) {
+          console.error("Failed to fetch videos from Firebase");
+          setInitialized(true);
+          return;
+        }
+        
+        const videos = await videosRes.json() as VideoMetadata[];
+        
+        if (!videos || videos.length === 0) {
+          console.log("No videos found in Firebase");
+          setInitialized(true);
+          return;
+        }
         
         // Take up to 3 videos and create sessions for them
         const videosToProcess = videos.slice(0, 3);
