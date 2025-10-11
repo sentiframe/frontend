@@ -74,29 +74,68 @@ export default function Dashboard() {
   const [transcript, setTranscript] = useState<any[]>([]);
   const [showReport, setShowReport] = useState(false);
   const [selectedUser, setSelectedUser] = useState('user1');
+  const [videoId, setVideoId] = useState("wagwan");
+  const [currentFrame, setCurrentFrame] = useState(0);
 
-  //todo: remove mock functionality - replace with real polling
+  // Poll Firebase every second for new frame data
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isRecording) {
-      interval = setInterval(() => {
-        setSessionDuration(d => {
-          const newDuration = d + 1;
-          const mockSegment = generateMockData(1)[0];
-          mockSegment.time = newDuration;
-          setSessionData(prev => [...prev, mockSegment]);
-          setCurrentTime(newDuration);
+      interval = setInterval(async () => {
+        setCurrentFrame(prevFrame => {
+          const nextFrame = prevFrame + 1;
           
-          if (newDuration % 5 === 0 && newDuration <= 40) {
-            setTranscript(prev => [...prev, mockTranscript[Math.floor(newDuration / 5) - 1]]);
-          }
+          // Fetch frame data from Firebase via backend API
+          fetch(`/api/frames/${videoId}/${nextFrame}`)
+            .then(res => res.json())
+            .then(frameData => {
+              if (frameData && !frameData.error && frameData.detections && frameData.detections.length > 0) {
+                const detection = frameData.detections[0];
+                const emotions = detection.emotion_scores;
+                
+                // Map Firebase format to chart format
+                const chartData = {
+                  time: nextFrame,
+                  Angry: emotions.anger || 0,
+                  Disgust: emotions.disgust || 0,
+                  Fear: emotions.fear || 0,
+                  Happy: emotions.happiness || 0,
+                  Sad: emotions.sadness || 0,
+                  Surprise: emotions.surprise || 0,
+                  Neutral: emotions.neutral || 0,
+                };
+                
+                // Calculate dominant emotion
+                const emotionValues = [
+                  { name: 'Angry', value: chartData.Angry },
+                  { name: 'Disgust', value: chartData.Disgust },
+                  { name: 'Fear', value: chartData.Fear },
+                  { name: 'Happy', value: chartData.Happy },
+                  { name: 'Sad', value: chartData.Sad },
+                  { name: 'Surprise', value: chartData.Surprise },
+                  { name: 'Neutral', value: chartData.Neutral },
+                ];
+                const dominant = emotionValues.reduce((max, curr) => curr.value > max.value ? curr : max);
+                
+                const dataPoint = {
+                  ...chartData,
+                  dominant: dominant.name,
+                  dominantValue: dominant.value
+                };
+                
+                setSessionData(prev => [...prev, dataPoint]);
+                setCurrentTime(nextFrame);
+                setSessionDuration(nextFrame);
+              }
+            })
+            .catch(err => console.error('Error fetching frame:', err));
           
-          return newDuration;
+          return nextFrame;
         });
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [isRecording]);
+  }, [isRecording, videoId]);
 
   useEffect(() => {
     if (sessionData.length > 1) {
@@ -123,6 +162,7 @@ export default function Dashboard() {
     setCriticalMoments([]);
     setTranscript([]);
     setShowReport(false);
+    setCurrentFrame(0);
     console.log('Starting session - will poll backend every second');
   };
 
@@ -194,6 +234,8 @@ export default function Dashboard() {
           onEndSession={handleEndSession}
           sessionDuration={sessionDuration}
           onExport={() => console.log('Export clicked')}
+          videoId={videoId}
+          onVideoIdChange={setVideoId}
         />
 
         {sessionData.length > 0 && !showReport && (

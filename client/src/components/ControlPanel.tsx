@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Play, Square, Download } from "lucide-react";
 
 interface ControlPanelProps {
@@ -8,9 +9,11 @@ interface ControlPanelProps {
   onEndSession: () => void;
   onExport?: () => void;
   sessionDuration?: number;
+  videoId?: string;
+  onVideoIdChange?: (id: string) => void;
 }
 
-export default function ControlPanel({ isRecording, onStartSession, onEndSession, onExport, sessionDuration = 0 }: ControlPanelProps) {
+export default function ControlPanel({ isRecording, onStartSession, onEndSession, onExport, sessionDuration = 0, videoId = "wagwan", onVideoIdChange }: ControlPanelProps) {
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -21,6 +24,19 @@ export default function ControlPanel({ isRecording, onStartSession, onEndSession
     <Card className="shadow-[0px_2px_8px_rgba(0,0,0,0.06)] dark:shadow-sm">
       <CardContent className="p-6">
         <div className="flex items-center gap-4 flex-wrap">
+          {!isRecording && onVideoIdChange && (
+            <div className="flex items-center gap-2">
+              <label htmlFor="video-id" className="text-sm font-medium">Video ID:</label>
+              <Input
+                id="video-id"
+                value={videoId}
+                onChange={(e) => onVideoIdChange(e.target.value)}
+                placeholder="Enter video ID"
+                className="w-40"
+                data-testid="input-video-id"
+              />
+            </div>
+          )}
           {!isRecording ? (
             <Button 
               onClick={() => {
