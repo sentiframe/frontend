@@ -84,60 +84,60 @@ export default function Dashboard() {
     let interval: NodeJS.Timeout;
     if (isRecording) {
       interval = setInterval(async () => {
-        setCurrentFrame(prevFrame => {
-          const nextFrame = prevFrame + 1;
+        const nextFrame = currentFrame + 1;
+        
+        try {
+          const res = await fetch(`/api/frames/${videoId}/${nextFrame}`);
+          const frameData = await res.json();
           
-          // Fetch frame data from Firebase via backend API
-          fetch(`/api/frames/${videoId}/${nextFrame}`)
-            .then(res => res.json())
-            .then(frameData => {
-              if (frameData && !frameData.error && frameData.detections && frameData.detections.length > 0) {
-                const detection = frameData.detections[0];
-                const emotions = detection.emotion_scores;
-                
-                // Map Firebase format to chart format
-                const chartData = {
-                  time: nextFrame,
-                  Angry: emotions.anger || 0,
-                  Disgust: emotions.disgust || 0,
-                  Fear: emotions.fear || 0,
-                  Happy: emotions.happiness || 0,
-                  Sad: emotions.sadness || 0,
-                  Surprise: emotions.surprise || 0,
-                  Neutral: emotions.neutral || 0,
-                };
-                
-                // Calculate dominant emotion
-                const emotionValues = [
-                  { name: 'Angry', value: chartData.Angry },
-                  { name: 'Disgust', value: chartData.Disgust },
-                  { name: 'Fear', value: chartData.Fear },
-                  { name: 'Happy', value: chartData.Happy },
-                  { name: 'Sad', value: chartData.Sad },
-                  { name: 'Surprise', value: chartData.Surprise },
-                  { name: 'Neutral', value: chartData.Neutral },
-                ];
-                const dominant = emotionValues.reduce((max, curr) => curr.value > max.value ? curr : max);
-                
-                const dataPoint = {
-                  ...chartData,
-                  dominant: dominant.name,
-                  dominantValue: dominant.value
-                };
-                
-                setSessionData(prev => [...prev, dataPoint]);
-                setCurrentTime(nextFrame);
-                setSessionDuration(nextFrame);
-              }
-            })
-            .catch(err => console.error('Error fetching frame:', err));
-          
-          return nextFrame;
-        });
+          if (frameData && !frameData.error && frameData.detections && frameData.detections.length > 0) {
+            const detection = frameData.detections[0];
+            const emotions = detection.emotion_scores;
+            
+            // Map Firebase format to chart format
+            const chartData = {
+              time: nextFrame,
+              Angry: emotions.anger || 0,
+              Disgust: emotions.disgust || 0,
+              Fear: emotions.fear || 0,
+              Happy: emotions.happiness || 0,
+              Sad: emotions.sadness || 0,
+              Surprise: emotions.surprise || 0,
+              Neutral: emotions.neutral || 0,
+            };
+            
+            // Calculate dominant emotion
+            const emotionValues = [
+              { name: 'Angry', value: chartData.Angry },
+              { name: 'Disgust', value: chartData.Disgust },
+              { name: 'Fear', value: chartData.Fear },
+              { name: 'Happy', value: chartData.Happy },
+              { name: 'Sad', value: chartData.Sad },
+              { name: 'Surprise', value: chartData.Surprise },
+              { name: 'Neutral', value: chartData.Neutral },
+            ];
+            const dominant = emotionValues.reduce((max, curr) => curr.value > max.value ? curr : max);
+            
+            const dataPoint = {
+              ...chartData,
+              dominant: dominant.name,
+              dominantValue: dominant.value
+            };
+            
+            setSessionData(prev => [...prev, dataPoint]);
+            setCurrentTime(nextFrame);
+            setSessionDuration(nextFrame);
+            setCurrentFrame(nextFrame);
+          } else {
+            console.log(`Frame ${nextFrame} not available yet, will retry...`);
+          }
+        } catch (err) {
+          console.error(`Error fetching frame ${nextFrame}:`, err);
+        }
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [isRecording, videoId]);
+  }, [isRecording, videoId, currentFrame]);
 
   useEffect(() => {
     if (sessionData.length > 1) {
@@ -173,6 +173,16 @@ export default function Dashboard() {
     setIsGeneratingReport(true);
     console.log('Session ended - generating AI report with', sessionData.length, 'frames');
     
+    if (sessionData.length === 0) {
+      setAiReport({
+        summary: "No emotion data was captured during this session.",
+        suggestions: ["Ensure the video ID is correct and contains frame data."]
+      });
+      setIsGeneratingReport(false);
+      setShowReport(true);
+      return;
+    }
+    
     try {
       const response = await fetch('/api/report/generate', {
         method: 'POST',
@@ -185,19 +195,20 @@ export default function Dashboard() {
       if (response.ok) {
         const report = await response.json();
         setAiReport(report);
-        console.log('AI report generated successfully');
+        console.log('AI report generated successfully:', report);
       } else {
-        console.error('Failed to generate report');
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        console.error('Failed to generate report:', errorData);
         setAiReport({
-          summary: "Unable to generate AI analysis at this time.",
-          suggestions: ["Please try again later."]
+          summary: "Unable to generate AI analysis. The API returned an error.",
+          suggestions: ["Please check the logs and try again."]
         });
       }
     } catch (error) {
       console.error('Error generating report:', error);
       setAiReport({
-        summary: "Unable to generate AI analysis at this time.",
-        suggestions: ["Please try again later."]
+        summary: "Unable to generate AI analysis due to a network error.",
+        suggestions: ["Please check your connection and try again."]
       });
     } finally {
       setIsGeneratingReport(false);

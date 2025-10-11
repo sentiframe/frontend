@@ -91,13 +91,18 @@ Provide a Chess.com-style analysis with a summary and actionable suggestions.`;
           required: ["summary", "suggestions"]
         }
       },
-      contents: prompt
+      contents: [{ role: "user", parts: [{ text: prompt }] }]
     });
 
     const rawJson = response.text;
     if (rawJson) {
-      const report: EmotionReport = JSON.parse(rawJson);
-      return report;
+      try {
+        const report: EmotionReport = JSON.parse(rawJson);
+        return report;
+      } catch (parseError) {
+        console.error("Failed to parse Gemini JSON response:", parseError);
+        throw new Error("Invalid JSON response from Gemini");
+      }
     } else {
       throw new Error("Empty response from Gemini");
     }
