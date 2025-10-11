@@ -2,8 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
-/* LIGHT MODE */
+/* LIGHT MODE - Updated for SentiFrame design */
 :root {
+  --font-size: 16px;
   --button-outline: rgba(0,0,0, .10);
   --badge-outline: rgba(0,0,0, .05);
 
@@ -14,17 +15,17 @@
   --elevate-1: rgba(0,0,0, .03);
   --elevate-2: rgba(0,0,0, .08);
 
-  --background: 220 20% 97%;
+  --background: 0 0% 100%;
 
-  --foreground: 220 10% 10%;
+  --foreground: 0 0% 6.67%;
 
-  --border: 220 15% 88%;
+  --border: 0 0% 10%;
 
   --card: 0 0% 100%;
 
-  --card-foreground: 220 10% 10%;
+  --card-foreground: 0 0% 6.67%;
 
-  --card-border: 220 15% 90%;
+  --card-border: 0 0% 90%;
 
   --sidebar: 220 18% 95%;
 
@@ -48,28 +49,30 @@
 
   --popover-border: 220 16% 86%;
 
-  --primary: 250 80% 60%;
+  --primary: 0 0% 1.18%;
 
-  --primary-foreground: 250 80% 98%;
+  --primary-foreground: 0 0% 100%;
 
-  --secondary: 220 14% 88%;
+  --secondary: 0 0% 96.08%;
 
-  --secondary-foreground: 220 10% 15%;
+  --secondary-foreground: 0 0% 1.18%;
 
-  --muted: 220 12% 90%;
+  --muted: 0 0% 92.55%;
 
-  --muted-foreground: 220 8% 35%;
+  --muted-foreground: 0 0% 44.31%;
 
-  --accent: 220 10% 92%;
+  --accent: 0 0% 91.37%;
 
-  --accent-foreground: 220 10% 15%;
+  --accent-foreground: 0 0% 1.18%;
 
-  --destructive: 0 85% 60%;
+  --destructive: 354 70% 54.1%;
 
-  --destructive-foreground: 0 85% 98%;
+  --destructive-foreground: 0 0% 100%;
 
-  --input: 220 15% 75%;
-  --ring: 250 80% 60%;
+  --input: transparent;
+  --input-background: 0 0% 95.29%;
+  --switch-background: 0 0% 79.61%;
+  --ring: 0 0% 43.92%;
   --chart-1: 250 80% 45%;
   --chart-2: 210 75% 50%;
   --chart-3: 330 75% 50%;

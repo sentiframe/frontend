@@ -1,0 +1,285 @@
+import { Card } from "./ui/card";
+import { Button } from "./ui/button";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { useState, useEffect } from "react";
+
+interface LiveSessionProps {
+  sessionName: string;
+  onEndSession: () => void;
+}
+
+type EmotionType = "All" | "Happy" | "Sad" | "Angry" | "Fear" | "Surprise" | "Disgust" | "Neutral";
+
+// Emotion colors
+const EMOTION_COLORS = {
+  Happy: "#F59E0B",
+  Sad: "#3B82F6",
+  Angry: "#EF4444",
+  Fear: "#A855F7",
+  Surprise: "#F97316",
+  Disgust: "#8B5CF6",
+  Neutral: "#6B7280",
+};
+
+// Mock data for the emotion chart
+const generateMockData = () => {
+  const data = [];
+  for (let i = 0; i <= 20; i++) {
+    const time = i * 5;
+    data.push({
+      time,
+      Happy: Math.max(0, Math.min(1, 0.4 + Math.sin(time / 15) * 0.3 + Math.random() * 0.15)),
+      Sad: Math.max(0, Math.min(1, 0.2 + Math.cos(time / 20) * 0.2 + Math.random() * 0.1)),
+      Angry: Math.max(0, Math.min(1, 0.15 + Math.sin(time / 25) * 0.15 + Math.random() * 0.1)),
+      Fear: Math.max(0, Math.min(1, 0.1 + Math.cos(time / 30) * 0.1 + Math.random() * 0.08)),
+      Surprise: Math.max(0, Math.min(1, 0.25 + Math.sin(time / 18) * 0.2 + Math.random() * 0.12)),
+      Disgust: Math.max(0, Math.min(1, 0.1 + Math.cos(time / 35) * 0.08 + Math.random() * 0.06)),
+      Neutral: Math.max(0, Math.min(1, 0.3 + Math.sin(time / 22) * 0.15 + Math.random() * 0.1)),
+    });
+  }
+  return data;
+};
+
+// Mock transcript lines
+const mockTranscript = [
+  { time: "00:05", timeInSeconds: 5, text: "Thank you all for being here today. I'm excited to share our progress." },
+  { time: "00:15", timeInSeconds: 15, text: "Over the past quarter, we've achieved some remarkable milestones." },
+  { time: "00:28", timeInSeconds: 28, text: "Our team has worked tirelessly to deliver exceptional results." },
+  { time: "00:42", timeInSeconds: 42, text: "Let me walk you through the key highlights and insights." },
+  { time: "00:55", timeInSeconds: 55, text: "First, our customer satisfaction scores have reached an all-time high." },
+  { time: "01:08", timeInSeconds: 68, text: "This is a testament to our commitment to quality and service." },
+  { time: "01:22", timeInSeconds: 82, text: "Moving forward, we'll continue to prioritize innovation and growth." },
+];
+
+export function LiveSession({ sessionName, onEndSession }: LiveSessionProps) {
+  const [data, setData] = useState(generateMockData());
+  const [transcript, setTranscript] = useState(mockTranscript.slice(0, 3));
+  const [lastUpdate, setLastUpdate] = useState(0);
+  const [selectedTime, setSelectedTime] = useState<number | null>(null);
+  const [selectedEmotion, setSelectedEmotion] = useState<EmotionType>("Happy");
+
+  // Simulate live updates
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setLastUpdate((prev) => prev + 1);
+      
+      // Occasionally add new transcript lines
+      if (lastUpdate % 5 === 0 && transcript.length < mockTranscript.length) {
+        setTranscript(mockTranscript.slice(0, transcript.length + 1));
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [lastUpdate, transcript.length]);
+
+  const handleTranscriptClick = (timeInSeconds: number) => {
+    setSelectedTime(timeInSeconds);
+  };
+
+  // Get emotion value at selected time
+  const getEmotionAtTime = (timeInSeconds: number, emotion: EmotionType) => {
+    if (emotion === "All") return "N/A";
+    
+    const dataPoint = data.find(d => d.time === timeInSeconds);
+    if (dataPoint) return dataPoint[emotion].toFixed(3);
+    
+    // Interpolate between points if exact match not found
+    const before = data.filter(d => d.time <= timeInSeconds).slice(-1)[0];
+    const after = data.find(d => d.time > timeInSeconds);
+    
+    if (before && after) {
+      const ratio = (timeInSeconds - before.time) / (after.time - before.time);
+      const interpolated = before[emotion] + (after[emotion] - before[emotion]) * ratio;
+      return interpolated.toFixed(3);
+    }
+    
+    return before?.[emotion].toFixed(3) || "N/A";
+  };
+
+  return (
+    <div className="min-h-screen bg-white">
+      {/* Header */}
+      <header className="border-b border-gray-200 px-8 py-6">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <h2>{sessionName}</h2>
+          <Button
+            variant="outline"
+            onClick={onEndSession}
+            className="border-red-200 text-red-600 hover:bg-red-50"
+          >
+            End Session
+          </Button>
+        </div>
+      </header>
+
+      {/* Main Section */}
+      <main className="px-8 py-12 max-w-7xl mx-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Left Column - Emotion Chart */}
+          <Card
+            className="p-8"
+            style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}
+          >
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3>
+                  {selectedEmotion === "All" ? "All Emotions Over Time" : `${selectedEmotion} Over Time`}
+                </h3>
+                {selectedTime !== null && selectedEmotion !== "All" && (
+                  <div className="text-sm text-muted-foreground">
+                    {selectedTime}s • {getEmotionAtTime(selectedTime, selectedEmotion)}
+                  </div>
+                )}
+              </div>
+              
+              {/* Emotion Filter Buttons */}
+              <div className="flex flex-wrap gap-1.5">
+                {(["All", "Happy", "Sad", "Angry", "Fear", "Surprise", "Disgust", "Neutral"] as EmotionType[]).map((emotion) => (
+                  <button
+                    key={emotion}
+                    onClick={() => setSelectedEmotion(emotion)}
+                    className={`px-3 py-1.5 rounded-md border transition-all duration-120 focus:outline-none focus:ring-2 focus:ring-black/80 ${
+                      selectedEmotion === emotion
+                        ? "bg-gray-900 text-white border-gray-900"
+                        : "border-gray-200 hover:bg-gray-50 hover:border-gray-300"
+                    }`}
+                    style={{ fontSize: "13px" }}
+                  >
+                    {emotion}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={data}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                  <XAxis
+                    type="number"
+                    dataKey="time"
+                    domain={[0, 100]}
+                    stroke="#94a3b8"
+                    style={{ fontSize: "12px" }}
+                    tickFormatter={(value) => `${value}s`}
+                  />
+                  <YAxis
+                    domain={[0, 1]}
+                    stroke="#94a3b8"
+                    style={{ fontSize: "12px" }}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "white",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "8px",
+                    }}
+                    labelFormatter={(value) => `${value}s`}
+                    formatter={(value: number) => value.toFixed(3)}
+                  />
+                  {selectedTime !== null && (
+                    <ReferenceLine
+                      x={selectedTime}
+                      stroke="#9ca3af"
+                      strokeWidth={2}
+                      strokeDasharray="4 4"
+                      label={{
+                        value: `${selectedTime}s`,
+                        position: "top",
+                        fill: "#6b7280",
+                        fontSize: 12,
+                      }}
+                    />
+                  )}
+                  
+                  {selectedEmotion === "All" ? (
+                    <>
+                      <Line type="monotone" dataKey="Happy" stroke={EMOTION_COLORS.Happy} strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Sad" stroke={EMOTION_COLORS.Sad} strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Angry" stroke={EMOTION_COLORS.Angry} strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Fear" stroke={EMOTION_COLORS.Fear} strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Surprise" stroke={EMOTION_COLORS.Surprise} strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Disgust" stroke={EMOTION_COLORS.Disgust} strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="Neutral" stroke={EMOTION_COLORS.Neutral} strokeWidth={2} dot={false} />
+                    </>
+                  ) : (
+                    <Line
+                      type="monotone"
+                      dataKey={selectedEmotion}
+                      stroke={EMOTION_COLORS[selectedEmotion]}
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  )}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Legend */}
+            <div className="mt-6 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
+              {selectedEmotion === "All" ? (
+                <>
+                  {(Object.keys(EMOTION_COLORS) as Array<keyof typeof EMOTION_COLORS>).map((emotion) => (
+                    <span key={emotion} className="flex items-center gap-2">
+                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: EMOTION_COLORS[emotion] }}></div>
+                      {emotion}
+                    </span>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <span className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: EMOTION_COLORS[selectedEmotion] }}></div>
+                    Current: {data[data.length - 1][selectedEmotion].toFixed(3)}
+                  </span>
+                </>
+              )}
+            </div>
+          </Card>
+
+          {/* Right Column - Transcript */}
+          <Card
+            className="p-8 flex flex-col"
+            style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}
+          >
+            <h3 className="mb-6">Live Transcript</h3>
+            <div className="flex-1 overflow-y-auto space-y-2 mb-6 max-h-80">
+              {transcript.map((line, index) => (
+                <div
+                  key={index}
+                  onClick={() => handleTranscriptClick(line.timeInSeconds)}
+                  className="pb-3 border-b border-gray-100 last:border-0 cursor-pointer rounded-lg px-3 py-2 -mx-3 transition-all duration-150"
+                  style={{
+                    backgroundColor: selectedTime === line.timeInSeconds ? "#eff6ff" : "transparent",
+                    borderLeft: selectedTime === line.timeInSeconds ? "3px solid #3B82F6" : "3px solid transparent",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (selectedTime !== line.timeInSeconds) {
+                      e.currentTarget.style.backgroundColor = "#f9fafb";
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    if (selectedTime !== line.timeInSeconds) {
+                      e.currentTarget.style.backgroundColor = "transparent";
+                    }
+                  }}
+                >
+                  <p className="text-muted-foreground mb-1" style={{ fontSize: "12px" }}>{line.time}</p>
+                  <p>{line.text}</p>
+                </div>
+              ))}
+            </div>
+            <Button variant="outline" className="w-full">
+              View Full Report
+            </Button>
+          </Card>
+        </div>
+
+        {/* Footer */}
+        <div className="mt-8 text-center text-muted-foreground">
+          Running locally • Last updated: {String(lastUpdate % 60).padStart(2, "0")}s ago
+        </div>
+      </main>
+    </div>
+  );
+}
