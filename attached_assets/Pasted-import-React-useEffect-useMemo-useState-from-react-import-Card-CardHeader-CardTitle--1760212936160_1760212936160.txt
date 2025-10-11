@@ -1,0 +1,233 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Slider } from "@/components/ui/slider";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer, Legend, ReferenceLine } from "recharts";
+
+/*************************
+
+SENTIMENT REVIEW — Chess.com‑style, Dominant Value
+• Y‑axis: dominant emotion value (0..1). X‑axis: time (s).
+• Below: selectable per‑emotion mini charts (0..1) so you can track any emotion individually.
+• Cleaner styling; no rate‑of‑change chart.
+*************************/
+const EMOTIONS = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"];
+
+function normalize(obj) {
+const total = EMOTIONS.reduce((a, k) => a + (obj[k] || 0), 0);
+if (total <= 0) return Object.fromEntries(EMOTIONS.map(k => [k, 0]));
+return Object.fromEntries(EMOTIONS.map(k => [k, (obj[k] || 0) / total]));
+}
+
+function maxKey(obj) {
+return Object.entries(obj).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "Neutral";
+}
+
+function makeDemo(seconds = 180) {
+const data = [];
+for (let t = 0; t < seconds; t++) {
+const phase = t < seconds / 4 ? "opening" : t < seconds / 2 ? "build" : t < (3 * seconds) / 4 ? "peak" : "resolve";
+// Craft phases so dominance CHANGES across the talk
+const base = {
+// opening: Warm start (Happy/Neutral) but not overwhelming
+Angry: phase === "opening" ? 0.05 : phase === "build" ? 0.08 : phase === "peak" ? 0.18 : 0.06,
+Disgust: phase === "opening" ? 0.02 : phase === "build" ? 0.03 : phase === "peak" ? 0.06 : 0.03,
+Fear: phase === "opening" ? 0.04 : phase === "build" ? 0.10 : phase === "peak" ? 0.22 : 0.07,
+Happy: phase === "opening" ? 0.45 : phase === "build" ? 0.28 : phase === "peak" ? 0.12 : 0.42,
+Sad: phase === "opening" ? 0.06 : phase === "build" ? 0.12 : phase === "peak" ? 0.20 : 0.08,
+Surprise:phase === "opening" ? 0.08 : phase === "build" ? 0.16 : phase === "peak" ? 0.10 : 0.10,
+Neutral: phase === "opening" ? 0.30 : phase === "build" ? 0.23 : phase === "peak" ? 0.12 : 0.24,
+};
+// gentle jitter so we get natural small movement
+const jittered = Object.fromEntries(
+EMOTIONS.map(k => [k, Math.max(0, base[k] + (Math.random() - 0.5) * (phase === "peak" ? 0.02 : 0.015))])
+);
+const probs = normalize(jittered);
+const dominant = maxKey(probs);
+data.push({ time: t + 1, ...probs, dominant, dominantValue: probs[dominant] });
+}
+return data;
+}
+
+export default function SpeechDominantEmotionDashboard() {
+const [series, setSeries] = useState([]);
+const [selectedSecond, setSelectedSecond] = useState(1);
+const [picked, setPicked] = useState(new Set(["Happy", "Sad", "Angry", "Neutral"]));
+const [criticals, setCriticals] = useState([]); // dominant switches
+
+useEffect(() => {
+const d = makeDemo(180);
+setSeries(d);
+setSelectedSecond(1);
+// detect dominant switches
+const sw = [];
+for (let i = 1; i < d.length; i++) {
+if (d[i].dominant !== d[i - 1].dominant) {
+const severity = Math.abs(d[i].dominantValue - d[i - 1].dominantValue);
+sw.push({ time: d[i].time, from: d[i - 1].dominant, to: d[i].dominant, severity });
+}
+}
+setCriticals(sw);
+}, []);
+
+const current = useMemo(() => series[Math.max(0, Math.min(series.length - 1, selectedSecond - 1))], [series, selectedSecond]);
+
+const toggle = (e) => {
+setPicked(prev => { const n = new Set(prev); n.has(e) ? n.delete(e) : n.add(e); return n; });
+};
+
+return (
+<div className="mx-auto max-w-7xl p-6 space-y-6">
+{/* Header */}
+<div className="rounded-2xl p-5 bg-gradient-to-r from-indigo-600 via-violet-600 to-sky-600 text-white shadow">
+<div className="flex items-center justify-between">
+<div>
+<h1 className="text-2xl font-bold tracking-tight">Speech Emotion Review</h1>
+<p className="text-sm/6 opacity-90">Dominant emotion over time, with focused emotion panels below.</p>
+</div>
+<Badge className="bg-white/15 hover:bg-white/20 text-white">Duration: {series.length || "…"}s</Badge>
+</div>
+</div>
+
+  {/* Evaluation bar + summary row (chess.com vibe) */}
+  <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+    {/* Left: vertical evaluation bar */}
+    <Card className="lg:col-span-1 overflow-hidden shadow-sm">
+      <CardHeader>
+        <CardTitle className="text-base">Now at {selectedSecond}s</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-end gap-4">
+          <div className="h-64 w-10 rounded-lg bg-muted relative overflow-hidden">
+            <div
+              className="absolute bottom-0 left-0 w-full bg-indigo-500"
+              style={{ height: `${Math.round((current?.dominantValue || 0) * 100)}%` }}
+            />
+          </div>
+          <div className="space-y-1">
+            <div className="text-xs text-muted-foreground">Dominant emotion</div>
+            <div className="text-xl font-semibold">{current?.dominant || "—"}</div>
+            <div className="text-sm">value: {(current?.dominantValue ?? 0).toFixed(2)}</div>
+          </div>
+        </div>
+        <div className="mt-4">
+          <div className="text-xs text-muted-foreground mb-2">Scrub time</div>
+          <Slider min={1} max={series.length || 1} step={1} value={[selectedSecond]} onValueChange={(v)=>setSelectedSecond(v[0])} />
+        </div>
+      </CardContent>
+    </Card>
+
+    {/* Right: dominant value over time */}
+    <Card className="lg:col-span-3 shadow-sm">
+      <CardHeader>
+        <CardTitle className="text-base">Dominant value vs time (0..1)</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="h-72 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={series} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="time" />
+              <YAxis domain={[0, 1]} />
+              <Tooltip />
+              <Legend />
+              <Line type="monotone" dataKey="dominantValue" name="Dominant" dot={false} />
+              {criticals.map((c, idx) => (
+                <ReferenceLine key={idx} x={c.time} strokeDasharray="4 4" strokeOpacity={0.5} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </CardContent>
+    </Card>
+  </div>
+
+  {/* Critical moments list (dominant switches) */}
+  <Card className="shadow-sm">
+    <CardHeader>
+      <CardTitle className="text-base">Critical moments (dominant emotion switches)</CardTitle>
+    </CardHeader>
+    <CardContent>
+      {criticals.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No switches detected.</p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {criticals.map((c, i) => (
+            <button
+              key={i}
+              onClick={() => setSelectedSecond(c.time)}
+              className={`text-left p-3 rounded-lg border hover:shadow transition ${Math.abs((c.time||0) - selectedSecond) < 2 ? 'bg-muted' : ''}`}
+            >
+              <div className="text-xs text-muted-foreground">@ {c.time}s</div>
+              <div className="font-medium">{c.from} → {c.to}</div>
+              <div className="text-xs">jump size: {c.severity.toFixed(2)}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </CardContent>
+  </Card>
+
+  {/* Emotion picker */}
+  <Card className="shadow-sm">
+    <CardHeader>
+      <CardTitle className="text-base">Emotions to show</CardTitle>
+    </CardHeader>
+    <CardContent>
+      <div className="flex flex-wrap gap-2">
+        {EMOTIONS.map(e => (
+          <Button key={e} size="sm" variant={picked.has(e) ? "default" : "secondary"} onClick={() => toggle(e)}>
+            {e}
+          </Button>
+        ))}
+      </div>
+    </CardContent>
+  </Card>
+
+  {/* Mini charts grid (selected emotions) */}
+  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+    {EMOTIONS.filter(e => picked.has(e)).map(e => (
+      <Card key={e} className="shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">{e} over time</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="h-52 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={series} margin={{ top: 10, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="time" hide />
+                <YAxis domain={[0, 1]} />
+                <Tooltip />
+                <Line type="monotone" dataKey={e} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </CardContent>
+      </Card>
+    ))}
+  </div>
+
+  {/* Transcript placeholder (optional hook) */}
+  {/* You can wire transcript + click-to-seek here later. */}
+</div>
+);
+}
+
+// ==============
+// Dev sanity test
+// ==============
+(function dev(){
+try{
+const p = normalize({ Happy: 0.5, Sad: 0.5 });
+const sum = EMOTIONS.reduce((a,k)=>a+(p[k]||0),0);
+console.assert(Math.abs(sum-1) < 1e-6, "normalize sums to 1");
+// ensure demo produces at least one switch
+const d = makeDemo(60);
+let switches = 0; for(let i=1;i<d.length;i++){ if(d[i].dominant!==d[i-1].dominant) switches++; }
+console.assert(switches>0, "demo should include dominant switches");
+}catch(e){ console.warn("Dev test warning:", e); }
+})();
+
+Given this, make it logically sound. This is the front end logic. Note that if one emotion suddenly takes over, the graph will not be continuous. like from 3-4 it mght be .80 happy and then from 4-5 it might be .4 happy .6 fear which makes it discrete. make it so that each graph is a diff line on the chart, and have it be a diff color. and style the critical moments, and just overall make it styled a lot better like beautifully. Integrate this into the current UI/UX. The logic should stay the same but the given code in this prompt is simply a proof of concept. use the current files styling as it is better.
