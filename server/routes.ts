@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { getFrame, getAllFrames, getAllVideos, type EmotionScores } from "./firebase";
 import { generateEmotionReport, type EmotionFrameData } from "./gemini";
-import { InsertSessionSchema, type EmotionDataPoint, type CriticalMomentType } from "@shared/schema";
+import { InsertSessionSchema, type InsertSession, type EmotionDataPoint, type CriticalMomentType } from "@shared/schema";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get all videos from Firebase
@@ -21,7 +21,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/frames/:videoId/:frameNumber", async (req, res) => {
     try {
       const { videoId, frameNumber } = req.params;
-      const frame = await getFrame(videoId, parseInt(frameNumber));
+      
+      // Handle both "frame_1" and "1" formats
+      let frameNum: number;
+      if (frameNumber.startsWith('frame_')) {
+        frameNum = parseInt(frameNumber.replace('frame_', ''));
+      } else {
+        frameNum = parseInt(frameNumber);
+      }
+      
+      if (isNaN(frameNum)) {
+        return res.status(400).json({ error: "Invalid frame number" });
+      }
+      
+      const frame = await getFrame(videoId, frameNum);
       
       if (!frame) {
         return res.status(404).json({ error: "Frame not found" });
@@ -84,6 +97,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching session:", error);
       res.status(500).json({ error: "Failed to fetch session" });
+    }
+  });
+
+  // Start new session with just a name
+  app.post("/api/start", async (req, res) => {
+    try {
+      const { name } = req.body as { name: string };
+      
+      if (!name || typeof name !== 'string' || name.trim().length === 0) {
+        return res.status(400).json({ error: "Session name is required" });
+      }
+
+      // Fetch available videos from Firebase to assign one
+      const videos = await getAllVideos();
+      
+      if (!videos || videos.length === 0) {
+        return res.status(400).json({ 
+          error: "No videos available in Firebase. Please upload video data to Firebase Firestore first, or contact support.",
+          code: "NO_VIDEOS"
+        });
+      }
+
+      // Use the first available video
+      const videoId = videos[0].id;
+
+      // Create session with minimal data
+      const now = new Date();
+      const sessionData: InsertSession = {
+        name: name.trim(),
+        date: now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+        time: now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+        duration: 0,
+        isFavorite: false,
+        videoId,
+        emotionData: [],
+      };
+
+      const session = await storage.createSession(sessionData);
+      res.json(session);
+    } catch (error) {
+      console.error("Error starting session:", error);
+      res.status(500).json({ error: "Failed to start session" });
     }
   });
 

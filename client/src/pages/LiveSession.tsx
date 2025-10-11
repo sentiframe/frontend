@@ -2,11 +2,10 @@ import { useState, useEffect, useMemo } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
-import type { EmotionDataPoint, CriticalMomentType } from "@shared/schema";
+import type { EmotionDataPoint, CriticalMomentType, Session } from "@shared/schema";
 
 interface LiveSessionProps {
-  sessionName: string;
-  videoId: string;
+  session: Session;
   onEndSession: (emotionData: EmotionDataPoint[], criticalMoments: CriticalMomentType[]) => void;
 }
 
@@ -32,6 +31,7 @@ const PulsingDot = ({ cx, cy, fill }: { cx: number; cy: number; fill: string }) 
         r={4}
         fill={fill}
         className="animate-pulse"
+        style={{ transformBox: "fill-box", transformOrigin: "center" }}
       />
       <circle
         cx={cx}
@@ -40,18 +40,20 @@ const PulsingDot = ({ cx, cy, fill }: { cx: number; cy: number; fill: string }) 
         fill={fill}
         opacity={0.3}
         className="animate-ping"
+        style={{ transformBox: "fill-box", transformOrigin: "center" }}
       />
     </g>
   );
 };
 
-export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionProps) {
+export function LiveSession({ session, onEndSession }: LiveSessionProps) {
   const [emotionData, setEmotionData] = useState<EmotionDataPoint[]>([]);
   const [criticalMoments, setCriticalMoments] = useState<CriticalMomentType[]>([]);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
   const [selectedEmotion, setSelectedEmotion] = useState<EmotionType>("Happy");
-  const [isRecording, setIsRecording] = useState(true);
+  const [isRecording, setIsRecording] = useState(false);
+  const [hasStarted, setHasStarted] = useState(false);
 
   // Calculate dynamic x-axis domain based on elapsed time
   const xAxisDomain = useMemo(() => {
@@ -69,56 +71,71 @@ export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionP
     }
   }, [currentFrame]);
 
-  // Poll Firebase every second for new frame data
+  // Poll Firebase every second for new frame data using frame_{n} syntax
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isRecording) {
-      interval = setInterval(async () => {
-        const nextFrame = currentFrame + 1;
+    let timeoutId: NodeJS.Timeout;
+    let isCancelled = false;
+    
+    const pollNextFrame = async (frameNum: number) => {
+      if (isCancelled || !isRecording) return;
+      
+      const frameName = `frame_${frameNum}`;
+      
+      try {
+        const res = await fetch(`/api/frames/${session.videoId}/${frameName}`);
+        const frameData = await res.json();
         
-        try {
-          const res = await fetch(`/api/frames/${videoId}/${nextFrame}`);
-          const frameData = await res.json();
+        if (frameData && !frameData.error && frameData.detections && frameData.detections.length > 0) {
+          const detection = frameData.detections[0];
+          const emotions = detection.emotion_scores;
           
-          if (frameData && !frameData.error && frameData.detections && frameData.detections.length > 0) {
-            const detection = frameData.detections[0];
-            const emotions = detection.emotion_scores;
-            
-            const chartData: EmotionDataPoint = {
-              time: nextFrame,
-              Angry: emotions.anger || 0,
-              Disgust: emotions.disgust || 0,
-              Fear: emotions.fear || 0,
-              Happy: emotions.happiness || 0,
-              Sad: emotions.sadness || 0,
-              Surprise: emotions.surprise || 0,
-              Neutral: emotions.neutral || 0,
-            };
-            
-            const emotionValues = [
-              { name: 'Angry', value: chartData.Angry },
-              { name: 'Disgust', value: chartData.Disgust },
-              { name: 'Fear', value: chartData.Fear },
-              { name: 'Happy', value: chartData.Happy },
-              { name: 'Sad', value: chartData.Sad },
-              { name: 'Surprise', value: chartData.Surprise },
-              { name: 'Neutral', value: chartData.Neutral },
-            ];
-            const dominant = emotionValues.reduce((max, curr) => curr.value > max.value ? curr : max);
-            
-            chartData.dominant = dominant.name;
-            chartData.dominantValue = dominant.value;
-            
-            setEmotionData(prev => [...prev, chartData]);
-            setCurrentFrame(nextFrame);
-          }
-        } catch (err) {
-          console.error(`Error fetching frame ${nextFrame}:`, err);
+          const chartData: EmotionDataPoint = {
+            time: frameNum,
+            Angry: emotions.anger || 0,
+            Disgust: emotions.disgust || 0,
+            Fear: emotions.fear || 0,
+            Happy: emotions.happiness || 0,
+            Sad: emotions.sadness || 0,
+            Surprise: emotions.surprise || 0,
+            Neutral: emotions.neutral || 0,
+          };
+          
+          const emotionValues = [
+            { name: 'Angry', value: chartData.Angry },
+            { name: 'Disgust', value: chartData.Disgust },
+            { name: 'Fear', value: chartData.Fear },
+            { name: 'Happy', value: chartData.Happy },
+            { name: 'Sad', value: chartData.Sad },
+            { name: 'Surprise', value: chartData.Surprise },
+            { name: 'Neutral', value: chartData.Neutral },
+          ];
+          const dominant = emotionValues.reduce((max, curr) => curr.value > max.value ? curr : max);
+          
+          chartData.dominant = dominant.name;
+          chartData.dominantValue = dominant.value;
+          
+          setEmotionData(prev => [...prev, chartData]);
+          setCurrentFrame(frameNum);
         }
-      }, 1000);
+      } catch (err) {
+        console.error(`Error fetching frame ${frameName}:`, err);
+      }
+      
+      // Schedule next poll only after current one completes
+      if (!isCancelled && isRecording) {
+        timeoutId = setTimeout(() => pollNextFrame(frameNum + 1), 1000);
+      }
+    };
+    
+    if (isRecording && session.videoId) {
+      pollNextFrame(currentFrame + 1);
     }
-    return () => clearInterval(interval);
-  }, [isRecording, videoId, currentFrame]);
+    
+    return () => {
+      isCancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [isRecording, session.videoId]);
 
   // Detect critical moments periodically
   useEffect(() => {
@@ -133,6 +150,11 @@ export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionP
         .catch(err => console.error('Error detecting critical moments:', err));
     }
   }, [emotionData]);
+
+  const handleStartRecording = () => {
+    setHasStarted(true);
+    setIsRecording(true);
+  };
 
   const handleEndSession = () => {
     setIsRecording(false);
@@ -163,19 +185,33 @@ export function LiveSession({ sessionName, videoId, onEndSession }: LiveSessionP
       <header className="border-b border-gray-200 px-8 py-6">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h2 style={{ fontSize: "18px", fontWeight: 600 }}>{sessionName}</h2>
-            <span className="px-2 py-1 rounded-md bg-red-100 text-red-700 text-xs font-medium" data-testid="recording-indicator">
-              ● RECORDING
-            </span>
+            <h2 style={{ fontSize: "18px", fontWeight: 600 }}>{session.name}</h2>
+            {isRecording && (
+              <span className="px-2 py-1 rounded-md bg-red-100 text-red-700 text-xs font-medium" data-testid="recording-indicator">
+                ● RECORDING
+              </span>
+            )}
           </div>
-          <Button
-            variant="outline"
-            onClick={handleEndSession}
-            data-testid="button-end-session"
-            className="border-red-200 text-red-600 hover:bg-red-50"
-          >
-            End Session
-          </Button>
+          <div className="flex items-center gap-2">
+            {!hasStarted ? (
+              <Button
+                onClick={handleStartRecording}
+                data-testid="button-start-recording"
+                className="bg-green-600 hover:bg-green-700 text-white"
+              >
+                Start Recording
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                onClick={handleEndSession}
+                data-testid="button-end-session"
+                className="border-red-200 text-red-600 hover:bg-red-50"
+              >
+                End Session
+              </Button>
+            )}
+          </div>
         </div>
       </header>
 
