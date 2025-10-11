@@ -76,6 +76,8 @@ export default function Dashboard() {
   const [selectedUser, setSelectedUser] = useState('user1');
   const [videoId, setVideoId] = useState("wagwan");
   const [currentFrame, setCurrentFrame] = useState(0);
+  const [aiReport, setAiReport] = useState<{ summary: string; suggestions: string[] } | null>(null);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
 
   // Poll Firebase every second for new frame data
   useEffect(() => {
@@ -166,10 +168,41 @@ export default function Dashboard() {
     console.log('Starting session - will poll backend every second');
   };
 
-  const handleEndSession = () => {
+  const handleEndSession = async () => {
     setIsRecording(false);
-    setShowReport(true);
-    console.log('Session ended - generating report');
+    setIsGeneratingReport(true);
+    console.log('Session ended - generating AI report with', sessionData.length, 'frames');
+    
+    try {
+      const response = await fetch('/api/report/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ frames: sessionData }),
+      });
+      
+      if (response.ok) {
+        const report = await response.json();
+        setAiReport(report);
+        console.log('AI report generated successfully');
+      } else {
+        console.error('Failed to generate report');
+        setAiReport({
+          summary: "Unable to generate AI analysis at this time.",
+          suggestions: ["Please try again later."]
+        });
+      }
+    } catch (error) {
+      console.error('Error generating report:', error);
+      setAiReport({
+        summary: "Unable to generate AI analysis at this time.",
+        suggestions: ["Please try again later."]
+      });
+    } finally {
+      setIsGeneratingReport(false);
+      setShowReport(true);
+    }
   };
 
   const handleToggleEmotion = (emotion: string) => {
@@ -184,34 +217,31 @@ export default function Dashboard() {
 
   const currentData = sessionData[currentTime - 1] || { dominant: "Neutral", dominantValue: 0 };
 
-  //todo: remove mock functionality - replace with real Gemini API call
-  const mockReport = {
-    summary: "The speech demonstrated strong engagement in the opening with predominantly happy and neutral emotions. However, a notable shift occurred around the 35-second mark where fear and anger briefly dominated, suggesting potential content sensitivity. The speaker recovered well in the final segment, returning to a positive emotional state. Overall emotional control was good with smooth transitions.",
-    suggestions: [
-      "Consider practicing the middle section where emotional intensity peaked - this may help maintain a more consistent delivery.",
-      "The transition at critical moments could be smoother. Try to anticipate emotional shifts and modulate your tone gradually.",
-      "Your opening and closing were excellent. Use the same confident energy throughout the entire presentation.",
-    ],
-    stats: {
-      totalDuration: sessionDuration,
-      emotionSwitches: criticalMoments.length,
-      dominantEmotion: sessionData.length > 0 ? 
-        Object.entries(
-          sessionData.reduce((acc: any, d: any) => {
-            acc[d.dominant] = (acc[d.dominant] || 0) + 1;
-            return acc;
-          }, {})
-        ).sort((a, b) => (b[1] as number) - (a[1] as number))[0]?.[0] || "Neutral"
-        : "Neutral",
-      dominantPercentage: sessionData.length > 0 ?
-        Math.round((Object.entries(
-          sessionData.reduce((acc: any, d: any) => {
-            acc[d.dominant] = (acc[d.dominant] || 0) + 1;
-            return acc;
-          }, {})
-        ).sort((a, b) => (b[1] as number) - (a[1] as number))[0]?.[1] as number || 0) / sessionData.length * 100)
-        : 0,
-    },
+  const reportStats = {
+    totalDuration: sessionDuration,
+    emotionSwitches: criticalMoments.length,
+    dominantEmotion: sessionData.length > 0 ? 
+      Object.entries(
+        sessionData.reduce((acc: any, d: any) => {
+          acc[d.dominant] = (acc[d.dominant] || 0) + 1;
+          return acc;
+        }, {})
+      ).sort((a, b) => (b[1] as number) - (a[1] as number))[0]?.[0] || "Neutral"
+      : "Neutral",
+    dominantPercentage: sessionData.length > 0 ?
+      Math.round((Object.entries(
+        sessionData.reduce((acc: any, d: any) => {
+          acc[d.dominant] = (acc[d.dominant] || 0) + 1;
+          return acc;
+        }, {})
+      ).sort((a, b) => (b[1] as number) - (a[1] as number))[0]?.[1] as number || 0) / sessionData.length * 100)
+      : 0,
+  };
+
+  const fullReport = {
+    summary: aiReport?.summary || "Generating analysis...",
+    suggestions: aiReport?.suggestions || [],
+    stats: reportStats,
   };
 
   return (
@@ -292,7 +322,16 @@ export default function Dashboard() {
         )}
 
         {showReport && sessionData.length > 0 && (
-          <SessionReport {...mockReport} />
+          <>
+            {isGeneratingReport && (
+              <div className="text-center py-8" data-testid="generating-report">
+                <p className="text-muted-foreground">Generating AI-powered analysis...</p>
+              </div>
+            )}
+            {!isGeneratingReport && aiReport && (
+              <SessionReport {...fullReport} />
+            )}
+          </>
         )}
 
         {!isRecording && sessionData.length === 0 && (
