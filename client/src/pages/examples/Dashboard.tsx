@@ -1,5 +1,5 @@
-import Dashboard from '../Dashboard';
+import { SessionDashboard } from "../SessionDashboard";
 
 export default function DashboardExample() {
-  return <Dashboard />;
+  return <SessionDashboard onStartSession={() => {}} onOpenSession={() => {}} />;
 }

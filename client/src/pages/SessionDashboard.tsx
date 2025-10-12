@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { queryClient } from "@/lib/queryClient";
-import { listSessionsFromApi, updateSessionMeta, deleteSessionLocally } from "@/lib/sessions";
+import { listSessionsFromFirebase, updateSessionMeta, deleteSessionLocally } from "@/lib/sessions";
 import type { Session } from "@shared/schema";
 
 interface SessionDashboardProps {
@@ -37,7 +37,7 @@ export function SessionDashboard({ onStartSession, onOpenSession }: SessionDashb
   // Fetch sessions
   const { data: sessions = [], isLoading } = useQuery<Session[]>({
     queryKey: ["sessions"],
-    queryFn: listSessionsFromApi,
+    queryFn: listSessionsFromFirebase,
   });
 
   useEffect(() => {

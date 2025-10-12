@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { listSessionsFromApi } from "@/lib/sessions";
+import { listSessionsFromFirebase } from "@/lib/sessions";
 import type { Session } from "@shared/schema";
 
 export default function VideosPage() {
@@ -12,7 +12,7 @@ export default function VideosPage() {
       setLoading(true);
       setError(null);
       try {
-        const result = await listSessionsFromApi();
+        const result = await listSessionsFromFirebase();
         setSessions(result);
       } catch (err: any) {
         console.error("/sessions", err);
@@ -54,4 +54,3 @@ export default function VideosPage() {
     </div>
   );
 }
-

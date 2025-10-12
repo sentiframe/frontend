@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import { Download, Trash2, ArrowLeft } from "lucide-react";
 import type { Session, EmotionDataPoint } from "@shared/schema";
+import type { PersonEmotionBreakdown } from "@/lib/sessions";
 
 interface ReportViewProps {
   session: Session;
@@ -23,7 +24,8 @@ interface ReportViewProps {
   onDelete: () => void;
 }
 
-type EmotionType = "All" | "Happy" | "Sad" | "Angry" | "Fear" | "Surprise" | "Disgust" | "Neutral";
+type EmotionType = "Happy" | "Sad" | "Angry" | "Fear" | "Surprise" | "Disgust" | "Neutral";
+type EmotionSelection = "Dominant" | "All" | EmotionType;
 
 const EMOTION_KEYS: EmotionType[] = [
   "Happy",
@@ -95,10 +97,19 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 
 export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewProps) {
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
-  const [selectedEmotion, setSelectedEmotion] = useState<EmotionType>("All");
+  const [selectedEmotion, setSelectedEmotion] = useState<EmotionSelection>("Dominant");
 
   const rawEmotionData = session.emotionData || [];
-  const criticalMoments = session.criticalMoments || [];
+  const rawCriticalMoments = session.criticalMoments || [];
+  const peopleBreakdown = useMemo<PersonEmotionBreakdown[]>(
+    () => (Array.isArray((session as any).peopleBreakdown) ? (session as any).peopleBreakdown : []),
+    [session]
+  );
+
+  const criticalMoments = useMemo(() => {
+    if (!rawCriticalMoments.length) return [] as typeof rawCriticalMoments;
+    return [...rawCriticalMoments].sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0)).slice(0, 3);
+  }, [rawCriticalMoments]);
 
   const { emotionData, dominantSegments, dominantEmotionSummary, stats } = useMemo(() => {
     if (!rawEmotionData.length) {
@@ -218,6 +229,72 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
       },
     };
   }, [rawEmotionData]);
+
+  const dominantStrokeGradient = useMemo(() => {
+    if (!emotionData.length) {
+      return {
+        id: "dominant-stroke",
+        stops: [
+          { offset: "0%", color: getEmotionColor("Neutral" as EmotionType) },
+          { offset: "100%", color: getEmotionColor("Neutral" as EmotionType) },
+        ],
+      };
+    }
+
+    const maxTime = emotionData[emotionData.length - 1].time || 1;
+    const id = `dominant-stroke-${dominantSegments.length}-${emotionData.length}`;
+    const stops: Array<{ offset: string; color: string }> = [];
+
+    dominantSegments.forEach((segment) => {
+      const safeStart = Math.max(0, Math.min(1, segment.start / maxTime));
+      const safeEnd = Math.max(safeStart, Math.min(1, segment.end / maxTime));
+      const color = getEmotionColor(segment.emotion);
+      stops.push({ offset: `${safeStart * 100}%`, color });
+      stops.push({ offset: `${safeEnd * 100}%`, color });
+    });
+
+    if (!stops.length) {
+      const color = getEmotionColor("Neutral" as EmotionType);
+      stops.push({ offset: "0%", color });
+      stops.push({ offset: "100%", color });
+    }
+
+  return { id, stops };
+}, [dominantSegments, emotionData]);
+
+  const lineConfigs = useMemo(() => {
+    if (selectedEmotion === "All") {
+      return EMOTION_KEYS.map((emotion) => ({
+        key: emotion,
+        name: emotion,
+        stroke: getEmotionColor(emotion),
+        strokeWidth: 2,
+        strokeOpacity: 0.85,
+      }));
+    }
+
+    if (selectedEmotion === "Dominant") {
+      return [
+        {
+          key: "dominantValue",
+          name: "Dominant",
+          stroke: `url(#${dominantStrokeGradient.id})`,
+          strokeWidth: 3,
+          strokeOpacity: 1,
+        },
+      ];
+    }
+
+    return [
+      {
+        key: selectedEmotion,
+        name: selectedEmotion,
+        stroke: getEmotionColor(selectedEmotion as EmotionType),
+        strokeWidth: 3,
+        strokeOpacity: 1,
+      },
+    ];
+  }, [selectedEmotion, dominantStrokeGradient.id]);
 
   const handleExport = () => {
     const csv = [
@@ -346,7 +423,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {(["All", ...EMOTION_KEYS] as EmotionType[]).map((emotion) => (
+                {(["Dominant", "All", ...EMOTION_KEYS] as EmotionSelection[]).map((emotion) => (
                   <Button
                     key={emotion}
                     size="sm"
@@ -365,13 +442,21 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                 <ComposedChart
                   data={emotionData}
                   margin={{ top: 20, right: 40, left: 0, bottom: 0 }}
-                  onMouseMove={(state) => setSelectedTime(state?.activeLabel ?? null)}
+                  onMouseMove={(state) => {
+                    const label = state?.activeLabel;
+                    setSelectedTime(typeof label === "number" ? label : label != null ? Number(label) : null);
+                  }}
                   onMouseLeave={() => setSelectedTime(null)}
                 >
                   <defs>
                     <linearGradient id="dominantGradient" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="#0ea5e9" stopOpacity={0.4} />
                       <stop offset="100%" stopColor="#2563eb" stopOpacity={0.05} />
+                    </linearGradient>
+                    <linearGradient id={dominantStrokeGradient.id} x1="0" y1="0" x2="1" y2="0">
+                      {dominantStrokeGradient.stops.map((stop, idx) => (
+                        <stop key={`${stop.offset}-${idx}`} offset={stop.offset} stopColor={stop.color} />
+                      ))}
                     </linearGradient>
                   </defs>
                   <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
@@ -415,27 +500,34 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                   ))}
 
                   {emotionData.length > 0 && (
-                    <Area type="monotone" dataKey="dominantValue" stroke="none" fill="url(#dominantGradient)" />
+                    <Area
+                      type="monotone"
+                      dataKey="dominantValue"
+                      stroke="none"
+                      fill="url(#dominantGradient)"
+                      isAnimationActive={false}
+                    />
                   )}
 
-                  {(selectedEmotion === "All" ? EMOTION_KEYS : [selectedEmotion]).map((emotion) => (
+                  {lineConfigs.map((config) => (
                     <Line
-                      key={emotion}
+                      key={config.key}
                       type="natural"
-                      dataKey={emotion}
-                      stroke={getEmotionColor(emotion)}
-                      strokeWidth={selectedEmotion === "All" ? 2 : 3}
+                      dataKey={config.key}
+                      stroke={config.stroke}
+                      strokeWidth={config.strokeWidth}
                       dot={false}
-                      strokeOpacity={selectedEmotion === "All" ? 0.85 : 1}
+                      strokeOpacity={config.strokeOpacity}
                       activeDot={{ r: 4 }}
-                      name={emotion}
+                      name={config.name}
+                      isAnimationActive={false}
                     />
                   ))}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
 
-            <div className="px-8 pb-8">
+            <div className="px-8 pb-6">
               <div className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
                 <h4 className="text-xs font-semibold uppercase tracking-widest text-slate-500">Dominant Emotion Timeline</h4>
                 <div className="mt-3 flex h-4 w-full overflow-hidden rounded-full">
@@ -461,6 +553,55 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                 </div>
               </div>
             </div>
+
+            {peopleBreakdown.length > 0 && (
+              <div className="px-8 pb-8">
+                <div className="rounded-2xl border border-slate-200 bg-white/85 p-5 shadow-sm">
+                  <h4 className="text-xs font-semibold uppercase tracking-widest text-slate-500">Audience Snapshot</h4>
+                  <p className="mt-1 text-xs text-slate-500">Latest dominant emotion per individual</p>
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    {peopleBreakdown.map((person) => {
+                      const ranked = EMOTION_KEYS.map((emotion) => ({ emotion, value: person.emotions[emotion] || 0 }))
+                        .sort((a, b) => b.value - a.value)
+                        .slice(0, 3);
+                      return (
+                        <div key={person.id} className="rounded-xl border border-slate-200/80 bg-slate-50/70 px-4 py-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-semibold text-slate-800">{person.label}</span>
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-600">
+                              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: getEmotionColor(person.dominantEmotion) }}></span>
+                              {person.dominantEmotion} {(person.dominantValue * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                          <div className="mt-2 space-y-1 text-xs text-slate-600">
+                            {ranked.map(({ emotion, value }) => (
+                              <div key={emotion} className="flex items-center justify-between">
+                                <span>{emotion}</span>
+                                <span>{(value * 100).toFixed(1)}%</span>
+                              </div>
+                            ))}
+                            <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-slate-400">
+                              <span>Frames</span>
+                              <span>{person.framesObserved}</span>
+                            </div>
+                          </div>
+                          {person.notes.length > 0 && (
+                            <ul className="mt-2 space-y-1 text-[11px] text-amber-600">
+                              {person.notes.map((note, idx) => (
+                                <li key={idx} className="flex items-start gap-1">
+                                  <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+                                  <span>{note}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
           </Card>
 
           <div className="space-y-6">
