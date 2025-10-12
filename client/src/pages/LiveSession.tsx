@@ -42,7 +42,7 @@ const EMOTION_COLORS: Record<EmotionKey, string> = {
   Neutral: "#6B7280",
 };
 
-// Keep Recharts line type simple; data will be pre-smoothed with quadratic regression
+// Simple line type; smoothing handled via quadratic regression below
 const LINE_TYPE: "linear" | "monotone" | "step" | "stepAfter" | "stepBefore" = "linear";
 
 type TranscriptSegment = { time: number; text: string };
@@ -126,14 +126,19 @@ function extractTranscriptList(maybeList: any): Array<{ start?: number; end?: nu
   if (Array.isArray(maybeList)) return maybeList;
   if (typeof maybeList === "object") {
     const keys = Object.keys(maybeList).sort((a, b) => Number(a) - Number(b));
-    return keys.map((k) => maybeList[k]);
+    return keys.map((k) => (maybeList as any)[k]);
   }
   return [];
 }
 
-/** ---- Quadratic regression smoothing helpers ----
- * Smooths y vs. x with a sliding quadratic fit (window size should be odd).
- */
+/** Unified transcript extractor (prefers frame.data.transcripts) */
+function getTranscriptsFromFrame(frame: any): Array<{ start?: number; end?: number; text?: string }> {
+  if (frame?.data?.transcripts != null) return extractTranscriptList(frame.data.transcripts);
+  if (frame?.transcripts != null) return extractTranscriptList(frame.transcripts);
+  return [];
+}
+
+/** -------- Quadratic regression smoothing for LIVE view -------- */
 function quadraticSmooth(points: { x: number; y: number }[], window = 9): { x: number; y: number }[] {
   if (points.length < 3 || window <= 2) return points;
   const nPts = points.length;
@@ -149,9 +154,7 @@ function quadraticSmooth(points: { x: number; y: number }[], window = 9): { x: n
       const x = points[k]!.x;
       const y = points[k]!.y ?? 0;
       n += 1;
-      const x2 = x * x;
-      const x3 = x2 * x;
-      const x4 = x3 * x;
+      const x2 = x * x, x3 = x2 * x, x4 = x3 * x;
       Sx += x; Sx2 += x2; Sx3 += x3; Sx4 += x4;
       Sy += y; Sxy += x * y; Sx2y += x2 * y;
     }
@@ -181,35 +184,44 @@ function quadraticSmooth(points: { x: number; y: number }[], window = 9): { x: n
   return out;
 }
 
-/** Smooth full emotion dataset once per render for all series */
 function buildSmoothedChartData(raw: EmotionDataPoint[], window = 9) {
   if (!raw.length) {
     return [{ time: 0, Happy: 0, Sad: 0, Angry: 0, Fear: 0, Surprise: 0, Disgust: 0, Neutral: 0 }];
   }
   const n = raw.length;
-  // Prepare per-emotion smoothed arrays (compute once)
   const smoothedByKey: Record<EmotionKey, number[]> = {} as any;
   for (const key of EMOTION_KEYS) {
     const pts = raw.map((p) => ({ x: p.time, y: p[key] ?? 0 }));
     const smooth = quadraticSmooth(pts, window);
-    smoothedByKey[key] = smooth.map((p) => {
-      if (Number.isFinite(p.y)) {
-        // Clamp to [0,1] in case of slight overshoot
-        return Math.max(0, Math.min(1, p.y));
-      }
-      return p.y ?? 0;
-    });
+    smoothedByKey[key] = smooth.map((p) => Math.max(0, Math.min(1, Number.isFinite(p.y) ? p.y : 0)));
   }
-  // Stitch rows back together
   const rows: any[] = new Array(n);
   for (let i = 0; i < n; i++) {
     const row: any = { time: raw[i]!.time };
-    for (const key of EMOTION_KEYS) {
-      row[key] = smoothedByKey[key]![i];
-    }
+    for (const key of EMOTION_KEYS) row[key] = smoothedByKey[key]![i];
     rows[i] = row;
   }
   return rows;
+}
+
+/** -------- Current Dominant “Overall Sentiment” module -------- */
+function computeCurrentDominant(point?: EmotionDataPoint | null): EmotionKey | null {
+  if (!point) return null;
+  let best: EmotionKey | null = null;
+  let val = -Infinity;
+  for (const k of EMOTION_KEYS) {
+    const v = point[k] ?? 0;
+    if (v > val) {
+      val = v;
+      best = k;
+    }
+  }
+  return best;
+}
+
+function colorToGradient(color: string) {
+  // Subtle modern gradient; keep text mostly dark
+  return `linear-gradient(135deg, ${color}22 0%, ${color}10 45%, #ffffff 100%)`;
 }
 
 const LiveTranscript: React.FC<{ segments: TranscriptSegment[] }> = ({ segments }) => (
@@ -243,6 +255,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
   const [currentFrame, setCurrentFrame] = useState(initialLastPoint ? initialLastPoint.time : 0);
 
   const latestFrameRef = useRef<number | null>(initialLastPoint ? initialLastPoint.time : null);
+  const lastFrameObjRef = useRef<any>(null);
   const emotionDataRef = useRef<EmotionDataPoint[]>(sessionFrames);
   const pollInFlightRef = useRef(false);
   const overlayTimeoutRef = useRef<number | null>(null);
@@ -254,53 +267,39 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
         if (isRecording && index === emotionDataRef.current.length - 1) {
           return <PulsingDot {...props} fill={color} />;
         }
+        // Show tiny node for other points (non-pulsing) to make series feel alive
         const cx = typeof props?.cx === "number" ? props.cx : 0;
         const cy = typeof props?.cy === "number" ? props.cy : 0;
-        return <circle cx={cx} cy={cy} r={0} fill="transparent" />;
+        return <circle cx={cx} cy={cy} r={1.25} fill={color} opacity={0.35} />;
       },
     [isRecording],
   );
 
-  // DEBUG button: dump all transcripts for the video to console
+  // DEBUG button: dump ALL frames' raw transcripts
   const dumpAllTranscriptsToConsole = useCallback(async () => {
     const videoId = session.videoId || session.id;
     try {
       const frames: any[] = await getAllFrames(videoId);
       console.groupCollapsed(`[TranscriptDump] /videos/${videoId}/frames  (frames: ${frames.length})`);
-      let totalSegs = 0;
       for (const f of frames) {
         const frameId =
-          f?.id || f?.frameId ||
-          (typeof f?.frame_number === "number" ? `frame_${f.frame_number}` :
-           typeof f?.time === "number" ? `frame_${Math.round(f.time)}` : "unknown_frame");
-
-        const list = extractTranscriptList(f?.transcripts);
-        if (!list.length) continue;
-
-        totalSegs += list.length;
-        console.groupCollapsed(`frames/${frameId} — transcripts (${list.length})`);
-        console.log("raw transcripts object:", f?.transcripts);
-        console.table(
-          list.map((s: any, i: number) => ({
-            idx: i,
-            start: typeof s?.start === "number" ? s.start : Number(s?.start ?? NaN),
-            end:   typeof s?.end   === "number" ? s.end   : Number(s?.end   ?? NaN),
-            text:  String(s?.text ?? "").trim(),
-          }))
-        );
-        if (list[0]) {
-          console.log("transcripts[0]:", { start: list[0].start, end: list[0].end, text: list[0].text });
+          f?.id || f?.frameId || f?.frame_number || f?.frameNumber ||
+          (typeof f?.time === "number" ? `frame_${Math.round(f.time)}` : "unknown_frame");
+        const list = getTranscriptsFromFrame(f);
+        if (list.length) {
+          console.log(`frames/${frameId} — RAW frame:`, f);
+          console.log(`frames/${frameId} — PARSED transcripts:`, list);
+        } else {
+          console.log(`frames/${frameId} — no transcripts found`, f);
         }
-        console.groupEnd();
       }
-      if (!totalSegs) console.info("[TranscriptDump] No transcript segments found.");
       console.groupEnd();
     } catch (e) {
       console.error("[TranscriptDump] Failed to read frames:", e);
     }
   }, [session.id, session.videoId]);
 
-  // Seed from session (including transcripts if present)
+  // Seed from session
   useEffect(() => {
     const frames: EmotionDataPoint[] = session.emotionData ?? [];
     setEmotionData(frames);
@@ -309,7 +308,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
     const seeded = detectCriticalMoments(frames, (session.criticalMoments as LocalMoment[]) || []);
     setAllCriticalMomentsLive(seeded);
 
-    const seededList = extractTranscriptList((session as any).transcripts);
+    const seededList = getTranscriptsFromFrame(session as any);
     const seededTranscript: TranscriptSegment[] = seededList.map((t: any) => ({
       time: typeof t?.end === "number" ? t.end : (typeof t?.start === "number" ? t.start : 0),
       text: String(t?.text ?? ""),
@@ -343,79 +342,67 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
     }
   }, [emotionData]);
 
-  // Poll live frames; log and append transcripts (map or array)
+  // Poll live frames; LOG last frame each second + parsed transcripts
   useEffect(() => {
     if (!isRecording) return;
     let cancelled = false;
 
+    const logLastFrameAndTranscripts = (tag: string) => {
+      if (lastFrameObjRef.current) {
+        console.log(`[LastFrame] ${tag}`, lastFrameObjRef.current);
+        const parsed = getTranscriptsFromFrame(lastFrameObjRef.current);
+        console.log(`[LastFrame] transcripts (${parsed.length})`, parsed);
+      } else {
+        console.log(`[LastFrame] ${tag} — none yet`);
+      }
+    };
+
     const fetchBatch = async () => {
-      if (cancelled || pollInFlightRef.current) return;
+      if (cancelled || pollInFlightRef.current) {
+        logLastFrameAndTranscripts("skipped (in-flight)");
+        return;
+      }
       pollInFlightRef.current = true;
       try {
         const videoId = session.videoId || session.id;
-        const lastFrame = latestFrameRef.current;
+        const lastFrameTime = latestFrameRef.current;
         const batch: any[] = await getFrameBatch(videoId, {
-          startAfter: typeof lastFrame === "number" ? lastFrame : undefined,
+          startAfter: typeof lastFrameTime === "number" ? lastFrameTime : undefined,
           limit: 120,
         });
 
-        if (cancelled || !batch.length) return;
+        if (batch?.length) {
+          const newest = batch[batch.length - 1];
+          lastFrameObjRef.current = newest;
+          logLastFrameAndTranscripts("new");
+        } else {
+          logLastFrameAndTranscripts("no-new");
+        }
+
+        if (!batch?.length) return;
 
         const baseIndex = emotionDataRef.current.length;
         const nextPoints = batch.map((frame, idx) => frameToEmotionPoint(frame, baseIndex + idx));
-        if (!nextPoints.length) return;
-
         const nextLatestPoint = nextPoints[nextPoints.length - 1];
         const latestTime = nextLatestPoint.time;
 
-        // --- transcript logging + normalization ---
-        console.groupCollapsed(`[TranscriptBatch] /videos/${videoId}/frames  (batch: ${batch.length})`);
-        let segs = 0;
+        // Append parsed transcripts to UI
         const newSegments: TranscriptSegment[] = [];
         for (const f of batch) {
-          const frameId =
-            f?.id || f?.frameId ||
-            (typeof f?.frame_number === "number" ? `frame_${f.frame_number}` :
-             typeof f?.time === "number" ? `frame_${Math.round(f.time)}` : "unknown_frame");
-          const list = extractTranscriptList(f?.transcripts);
-          if (!list.length) continue;
-
-          segs += list.length;
-          console.groupCollapsed(`frames/${frameId} — transcripts (${list.length})`);
-          console.log("raw transcripts object:", f?.transcripts);
-          console.table(
-            list.map((s: any, i: number) => ({
-              idx: i,
-              start: s?.start,
-              end: s?.end,
-              text: s?.text,
-            }))
-          );
-          if (list[0]) console.log("transcripts[0]:", list[0]);
-          console.groupEnd();
-
+          const list = getTranscriptsFromFrame(f);
           for (const seg of list) {
             const text = String(seg?.text ?? "");
             if (!text.trim()) continue;
             const t =
               typeof seg?.end === "number" ? seg.end :
               typeof seg?.start === "number" ? seg.start :
-              typeof f?.time === "number" ? f.time : 0;
+              (typeof f?.data?.timestamp === "string" ? Date.parse(f.data.timestamp) / 1000 :
+               (typeof f?.time === "number" ? f.time : 0));
             newSegments.push({ time: t, text });
           }
         }
-        if (!segs) console.info("[TranscriptBatch] No transcripts found in this batch.");
-        console.groupEnd();
-
-        if (newSegments.length) newSegments.sort((a, b) => a.time - b.time);
-
-        setEmotionData((prev) => {
-          const merged = [...prev, ...nextPoints];
-          emotionDataRef.current = merged;
-          return merged;
-        });
-
         if (newSegments.length) {
+          newSegments.sort((a, b) => a.time - b.time);
           setTranscript((prev) => {
             const seen = new Set(prev.map((s) => `${s.time}|${s.text}`));
             const filtered = newSegments.filter((s) => {
@@ -424,14 +411,15 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
               seen.add(key);
               return true;
             });
-            if (filtered.length) {
-              console.groupCollapsed(`[TranscriptUIAppend] appending ${filtered.length} segment(s)`);
-              console.table(filtered);
-              console.groupEnd();
-            }
             return filtered.length ? [...prev, ...filtered] : prev;
           });
         }
+
+        setEmotionData((prev) => {
+          const merged = [...prev, ...nextPoints];
+          emotionDataRef.current = merged;
+          return merged;
+        });
 
         setAllCriticalMomentsLive((prev) => detectCriticalMoments(emotionDataRef.current, prev));
         latestFrameRef.current = latestTime;
@@ -481,7 +469,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
     }
   }, [isRecording, isStarting, isEnding, session.id]);
 
-  // Per request: End -> refresh the page
+  // End -> refresh the page
   const handleEndSession = useCallback(async () => {
     if (isEnding) return;
     setIsEnding(true);
@@ -497,17 +485,21 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
     }, 250);
   }, [isEnding, session.id]);
 
-  // >>> Quadratic regression–smoothed chart data <<<
-  const chartData = useMemo(() => buildSmoothedChartData(emotionData,  nineAdaptive(emotionData.length)), [emotionData]);
-
-  // small helper to adapt window a bit as data grows (odd numbers only)
-  function nineAdaptive(n: number) {
+  // LIVE chart data (quadratic regression smoothing)
+  const chartData = useMemo(() => buildSmoothedChartData(emotionData, adaptiveWindow(emotionData.length)), [emotionData]);
+  function adaptiveWindow(n: number) {
     if (n < 15) return 5;
     if (n < 40) return 7;
     if (n < 100) return 9;
     if (n < 200) return 11;
     return 13;
   }
+
+  // Current dominant (from latest RAW point so it reflects true live sentiment)
+  const latestPoint = emotionDataRef.current.length ? emotionDataRef.current[emotionDataRef.current.length - 1] : null;
+  const currentDominant = computeCurrentDominant(latestPoint);
+  const dominantColor = currentDominant ? EMOTION_COLORS[currentDominant] : "#CBD5E1";
+  const overallGradient = colorToGradient(dominantColor);
 
   return (
     <div className="min-h-screen bg-white">
@@ -566,6 +558,39 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
 
       <main className="px-8 py-12 max-w-7xl mx-auto">
         <style>{REVEAL_CSS}</style>
+
+        {/* Overall Sentiment (current dominant) */}
+        <div
+          className="mb-8 rounded-2xl border shadow-sm p-5"
+          style={{
+            borderColor: `${dominantColor}55`,
+            background: overallGradient,
+          }}
+        >
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">Overall Sentiment (Live)</p>
+              <div className="mt-1 flex items-center gap-2">
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{ backgroundColor: dominantColor }}
+                />
+                <span className="text-xl font-semibold text-slate-900">
+                  {currentDominant ?? "—"}
+                </span>
+                {currentDominant && latestPoint && (
+                  <span className="text-sm text-slate-700">
+                    {(latestPoint[currentDominant] * 100).toFixed(1)}%
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="text-xs text-slate-600">
+              Updated @ {latestPoint ? `${latestPoint.time.toFixed(1)}s` : "—"}
+            </div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           {/* Left: Chart & Moments */}
           <div className="lg:col-span-8 space-y-8">
@@ -573,7 +598,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
               <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
                 <div>
                   <h3 style={{ fontSize: "18px", fontWeight: 600 }}>Emotion Telemetry</h3>
-                  <p className="text-sm text-muted-foreground mt-1">Live confidence scores update every second during recording.</p>
+                  <p className="text-sm text-muted-foreground mt-1">Live confidence scores update every second during recording. (Quad-reg smoothed)</p>
                 </div>
                 <div className="flex gap-2 flex-wrap">
                   {(["All", ...EMOTION_KEYS] as EmotionType[]).map((emotion) => (
@@ -620,7 +645,8 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                             strokeLinecap="round"
                             strokeLinejoin="round"
                             activeDot={{ r: 3, stroke: EMOTION_COLORS[emotion], strokeWidth: 2, fill: "#fff" }}
-                            dot={false}
+                            // Pulsating last nodes per emotion:
+                            dot={createDotRenderer(EMOTION_COLORS[emotion])}
                           />
                         ))
                       : isEmotionKey(selectedEmotion) && (
@@ -635,7 +661,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                             strokeLinecap="round"
                             strokeLinejoin="round"
                             activeDot={{ r: 3, stroke: EMOTION_COLORS[selectedEmotion], strokeWidth: 2, fill: "#fff" }}
-                            dot={false}
+                            dot={createDotRenderer(EMOTION_COLORS[selectedEmotion])}
                           />
                         )}
                   </LineChart>
@@ -675,13 +701,18 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                     <button
                       key={`${moment.time}-${idx}`}
                       onClick={() => setSelectedTime(moment.time)}
-                      className="flex w-full items-center gap-3 rounded-lg border border-gray-200 p-3 text-left transition-all hover:bg-gray-50"
+                      className="flex w-full items-center gap-3 rounded-lg border p-3 text-left transition-all hover:bg-gray-50"
+                      style={{ borderColor: `${EMOTION_COLORS[(moment.emotion as EmotionKey) ?? "Neutral"]}55` }}
                       data-testid={`critical-moment-${idx}`}
                     >
-                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: EMOTION_COLORS[(moment.emotion as EmotionKey) ?? "Neutral"] ?? "#94a3b8" }} />
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: EMOTION_COLORS[(moment.emotion as EmotionKey) ?? "Neutral"] ?? "#94a3b8" }} />
                       <div className="flex-1">
-                        <p className="text-sm font-medium">{moment.description ?? `${moment.emotion} event`} • {moment.time.toFixed(2)}s</p>
-                        <p className="text-xs text-muted-foreground">{moment.emotion} • Intensity {(moment.intensity ?? 0).toFixed(2)}</p>
+                        <p className="text-sm font-medium">
+                          {moment.description ?? `${moment.emotion} event`} • {moment.time.toFixed(2)}s
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {moment.emotion} • Intensity {(moment.intensity ?? 0).toFixed(2)}
+                        </p>
                       </div>
                     </button>
                   ))}
@@ -698,7 +729,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                 <span className="text-xs text-slate-400">{transcript.length} line{transcript.length === 1 ? "" : "s"}</span>
               </div>
               <p className="text-xs text-muted-foreground mb-4">
-                Pulled from <code>transcripts</code> (map or array) under each frame. Use the header button to log to console.
+                Parsed from <code>frame.data.transcripts</code> when available (falls back to <code>frame.transcripts</code>).
               </p>
               <div className="max-h-[520px] overflow-auto pr-1">
                 <LiveTranscript segments={transcript} />
@@ -725,3 +756,11 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
     </div>
   );
 }
+
+/**
+ * Notes:
+ * - LIVE view: quadratic regression smoothing (buildSmoothedChartData + quadraticSmooth).
+ * - Pulsating last nodes per emotion are enabled via dot={createDotRenderer(color)}.
+ * - “Overall Sentiment (Live)” module at top tints the container based on current dominant emotion (from latest RAW point).
+ * - REPORT view: keep your existing file; use your Taylor polynomial/“natural”/monotone fit as you have it there.
+ */

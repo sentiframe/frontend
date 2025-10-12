@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
-import { FileText, MoreVertical, Upload, Search, Star, Trash2, Edit3 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { FileText, MoreVertical, Search, Star, Trash2, Edit3 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,9 +23,65 @@ type SortType = "Newest first" | "By title A–Z";
 const TIPS = [
   "Name sessions after the event to find them faster.",
   "Use the search bar to quickly locate past sessions.",
-  "Export reports as CSV for deeper analysis.",
   "End sessions promptly to ensure accurate timestamps.",
+  "Mark standout talks as Favorites to surface them later.",
 ];
+
+function startOfWeekLocal(d: Date) {
+  const copy = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = copy.getDay();
+  copy.setDate(copy.getDate() - day);
+  copy.setHours(0, 0, 0, 0);
+  return copy;
+}
+function parseSessionDate(value: string) {
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+function displayName(session: Session) {
+  // @ts-ignore – tolerate unknown shape gracefully
+  return session.displayName || session.name || "(Untitled)";
+}
+
+/** small helpers */
+function StatCard({
+  label,
+  value,
+  accent = false,
+}: {
+  label: string;
+  value: number | string;
+  accent?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-2xl px-4 py-3 shadow-sm backdrop-blur ${
+        accent
+          ? "bg-white/20 text-white border border-white/25"
+          : "bg-white text-gray-900 border border-gray-100"
+      }`}
+    >
+      <div
+        className={`text-[12px] uppercase tracking-wide ${
+          accent ? "text-white/80" : "text-gray-500"
+        }`}
+      >
+        {label}
+      </div>
+      <div className={`mt-0.5 text-[22px] font-semibold ${accent ? "text-white" : "text-gray-900"}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function Pill({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="rounded-full border border-white/25 bg-white/10 px-3 py-1 text-[12px] text-white/90 backdrop-blur">
+      {children}
+    </span>
+  );
+}
 
 export function SessionDashboard({ onStartSession, onOpenSession }: SessionDashboardProps) {
   const [activeFilter, setActiveFilter] = useState<FilterType>("All");
@@ -34,361 +90,391 @@ export function SessionDashboard({ onStartSession, onOpenSession }: SessionDashb
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
-  // Fetch sessions
-  const { data: sessions = [], isLoading } = useQuery<Session[]>({
+  const { data: sessions = [], isLoading, isError, refetch } = useQuery<Session[]>({
     queryKey: ["sessions"],
     queryFn: listSessionsFromFirebase,
   });
 
-  useEffect(() => {
-    if (!isLoading) {
-      console.info('[SessionDashboard] Sessions data:', sessions);
-      sessions.forEach((session) => {
-        console.info('[SessionDashboard] Session detail:', session);
-      });
-    }
-  }, [sessions, isLoading]);
-
-  // Delete session mutation
+  // Delete (optimistic)
   const deleteMutation = useMutation({
     mutationFn: async (sessionId: string) => {
-      await deleteSessionLocally(sessionId);
+      const prev = queryClient.getQueryData<Session[]>(["sessions"]) || [];
+      queryClient.setQueryData(["sessions"], prev.filter((s) => s.id !== sessionId));
+      try {
+        await deleteSessionLocally(sessionId);
+      } catch (e) {
+        queryClient.setQueryData(["sessions"], prev);
+        throw e;
+      }
       return { success: true };
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
   });
 
-  // Toggle favorite mutation
+  // Favorite (optimistic)
   const toggleFavoriteMutation = useMutation({
     mutationFn: async ({ sessionId, isFavorite }: { sessionId: string; isFavorite: boolean }) => {
-      updateSessionMeta(sessionId, { isFavorite: !isFavorite });
+      const prev = queryClient.getQueryData<Session[]>(["sessions"]) || [];
+      queryClient.setQueryData(
+        ["sessions"],
+        prev.map((s) => (s.id === sessionId ? { ...s, isFavorite: !isFavorite } : s)),
+      );
+      try {
+        await updateSessionMeta(sessionId, { isFavorite: !isFavorite });
+      } catch (e) {
+        queryClient.setQueryData(["sessions"], prev);
+        throw e;
+      }
       return { success: true };
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
   });
 
-  // Rename session mutation
+  // Rename (optimistic)
   const renameMutation = useMutation({
     mutationFn: async ({ sessionId, name }: { sessionId: string; name: string }) => {
-      updateSessionMeta(sessionId, { displayName: name });
+      const prev = queryClient.getQueryData<Session[]>(["sessions"]) || [];
+      queryClient.setQueryData(
+        ["sessions"],
+        prev.map((s) => (s.id === sessionId ? { ...s, name } : s)),
+      );
+      try {
+        await updateSessionMeta(sessionId, { displayName: name });
+      } catch (e) {
+        queryClient.setQueryData(["sessions"], prev);
+        throw e;
+      }
       return { success: true };
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
   });
 
-  // Get current time of day greeting
+  // Header info
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-  
-  // Format current date
-  const today = new Date().toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "short",
-    day: "numeric",
-  });
+  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+  const weekStart = startOfWeekLocal(new Date());
 
-  // Calculate sessions this week
-  const getStartOfWeek = () => {
-    const now = new Date();
-    const day = now.getDay();
-    const diff = now.getDate() - day;
-    return new Date(now.setDate(diff));
-  };
+  const thisWeekCount = useMemo(
+    () => sessions.filter((s) => parseSessionDate(s.date) >= weekStart).length,
+    [sessions, weekStart],
+  );
+  const favoritesCount = useMemo(() => sessions.filter((s) => s.isFavorite).length, [sessions]);
+  const recentCount = useMemo(() => {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    return sessions.filter((s) => parseSessionDate(s.date) >= sevenDaysAgo).length;
+  }, [sessions]);
 
-  const startOfWeek = getStartOfWeek();
-  const thisWeekCount = sessions.filter(session => {
-    const sessionDate = new Date(session.date);
-    return sessionDate >= startOfWeek;
-  }).length;
+  // Derived list
+  const filteredSessions = useMemo(() => {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-  // Get daily rotating tip
-  const tipIndex = new Date().getDate() % TIPS.length;
-  const todaysTip = TIPS[tipIndex];
-
-  // Helper function to parse session date
-  const parseSessionDate = (dateStr: string) => {
-    return new Date(dateStr);
-  };
-
-  // Filter and sort sessions
-  const filteredSessions = sessions
-    .filter((session) => {
-      const now = new Date();
-      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      const sessionDate = parseSessionDate(session.date);
-
-      switch (activeFilter) {
-        case "Favorites":
-          if (!session.isFavorite) return false;
-          break;
-        case "Recent":
-          if (sessionDate < sevenDaysAgo) return false;
-          break;
-        case "This week":
-          if (sessionDate < startOfWeek) return false;
-          break;
-        case "All":
-        default:
-          break;
-      }
-
-      return session.name.toLowerCase().includes(searchQuery.toLowerCase());
-    })
-    .sort((a, b) => {
-      if (sortBy === "By title A–Z") {
-        return a.name.localeCompare(b.name);
-      }
-      const dateA = parseSessionDate(a.date);
-      const dateB = parseSessionDate(b.date);
-      return dateB.getTime() - dateA.getTime();
+    const base = sessions.filter((session) => {
+      const when = parseSessionDate(session.date);
+      if (activeFilter === "Favorites" && !session.isFavorite) return false;
+      if (activeFilter === "Recent" && when < sevenDaysAgo) return false;
+      if (activeFilter === "This week" && when < weekStart) return false;
+      return displayName(session).toLowerCase().includes(searchQuery.toLowerCase());
     });
 
-  const handleRenameClick = (session: Session, e: React.MouseEvent) => {
+    base.sort((a, b) => {
+      if (sortBy === "By title A–Z") return displayName(a).localeCompare(displayName(b));
+      return parseSessionDate(b.date).getTime() - parseSessionDate(a.date).getTime();
+    });
+
+    return base;
+  }, [sessions, activeFilter, weekStart, searchQuery, sortBy]);
+
+  // Rename helpers
+  const startRename = (session: Session, e: React.MouseEvent) => {
     e.stopPropagation();
     setRenamingSessionId(session.id);
-    setRenameValue(session.name);
+    setRenameValue(displayName(session));
   };
-
-  const handleRenameSubmit = (sessionId: string) => {
-    if (renameValue.trim()) {
-      renameMutation.mutate({ sessionId, name: renameValue.trim() });
-    }
+  const submitRename = (sessionId: string) => {
+    const name = renameValue.trim();
     setRenamingSessionId(null);
-    setRenameValue("");
+    if (!name) return;
+    renameMutation.mutate({ sessionId, name });
   };
 
-  const handleRenameKeyDown = (e: React.KeyboardEvent, sessionId: string) => {
-    if (e.key === "Enter") {
-      handleRenameSubmit(sessionId);
-    } else if (e.key === "Escape") {
-      setRenamingSessionId(null);
-      setRenameValue("");
-    }
-  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setRenamingSessionId(null);
+        setRenameValue("");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   if (isLoading) {
-    return <div className="min-h-screen bg-white flex items-center justify-center">Loading...</div>;
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <div className="rounded-xl border border-gray-200 bg-white px-6 py-4 text-sm text-gray-600 shadow-sm">
+          Loading sessions…
+        </div>
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <div className="rounded-xl border border-red-200 bg-red-50 px-6 py-4 text-sm text-red-700 shadow-sm">
+          Failed to load sessions.&nbsp;
+          <button className="underline underline-offset-2 hover:opacity-80" onClick={() => refetch()}>
+            Try again
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="min-h-screen bg-white">
-      {/* Header */}
-      <header className="px-6 pt-6 pb-4 border-b border-gray-200">
-        <div className="mx-auto max-w-6xl">
-          <h1 className="tracking-tight" style={{ fontSize: "21px", fontWeight: 500 }}>
-            SentiFrame
-          </h1>
-          <p className="mt-1" style={{ color: "#6b7280", fontSize: "13px" }}>
-            {greeting} 👋 — {today} • {thisWeekCount} {thisWeekCount === 1 ? "session" : "sessions"} this week
-          </p>
-          <div className="mt-3 flex gap-2">
+    <div className="min-h-screen bg-[#f7f8fb]">
+      {/* Hero / Header */}
+      <header className="bg-gradient-to-r from-violet-600 to-blue-500">
+        <div className="mx-auto max-w-6xl px-6 py-7">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h1 className="tracking-tight text-[22px] font-semibold text-white">SentiFrame</h1>
+              <p className="mt-0.5 text-[13px] text-white/90">
+                {greeting} 👋 — {today} • {thisWeekCount} {thisWeekCount === 1 ? "session" : "sessions"} this week
+              </p>
+
+              {/* leaner feature set */}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Pill>Emotion timeline</Pill>
+                <Pill>Live transcription</Pill>
+                <Pill>AI summaries</Pill>
+              </div>
+            </div>
+
             <button
               onClick={onStartSession}
               data-testid="button-start-session"
-              className="px-3 py-1.5 rounded-md bg-black text-white hover:bg-gray-800 active:translate-y-[1px] transition-all duration-120 focus:outline-none focus:ring-2 focus:ring-black/80 focus:ring-offset-2"
-              style={{ fontSize: "14px", minHeight: "36px" }}
+              className="h-9 rounded-lg bg-white/95 px-4 text-[14px] font-medium text-gray-900 shadow
+hover:bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/60
+hover:shadow-[0_10px_24px_-12px_rgba(124,58,237,0.45)]"
+
             >
               Start new session
             </button>
-            <button
-              className="p-2 rounded-md border border-gray-200 hover:border-gray-300 hover:bg-gray-50 active:translate-y-[1px] transition-all duration-120 focus:outline-none focus:ring-2 focus:ring-black/80 focus:ring-offset-2"
-              style={{ minHeight: "36px" }}
-              title="Import audio"
-              data-testid="button-import"
-            >
-              <Upload className="w-4 h-4" style={{ color: "#6b7280" }} />
-            </button>
+          </div>
+
+          {/* Stats (glass on gradient) */}
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <StatCard label="All sessions" value={sessions.length} accent />
+            <StatCard label="This week" value={thisWeekCount} accent />
+            <StatCard label="Recent (7d)" value={recentCount} accent />
+            <StatCard label="Favorites" value={favoritesCount} accent />
           </div>
         </div>
       </header>
 
-      {/* Main Section */}
+      {/* Controls bar */}
+      <div className="border-b border-gray-200 bg-white/80 backdrop-blur">
+        <div className="mx-auto max-w-6xl px-6">
+          <div className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-[16px] font-semibold text-gray-900">Your sessions</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Sort */}
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortType)}
+                data-testid="select-sort"
+                className="h-9 rounded-md border border-gray-200 bg-white px-2.5 text-[13px] text-gray-700 shadow-sm transition-all hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-violet-500/60"
+              >
+                <option>Newest first</option>
+                <option>By title A–Z</option>
+              </select>
+
+              {/* Filters */}
+              <div className="hidden gap-1 sm:flex">
+                {(["All", "Recent", "Favorites", "This week"] as FilterType[]).map((filter) => {
+                  const active = activeFilter === filter;
+                  return (
+                    <button
+                      key={filter}
+                      onClick={() => setActiveFilter(filter)}
+                      data-testid={`button-filter-${filter.toLowerCase().replace(" ", "-")}`}
+                      className={`rounded-full px-3 py-1.5 text-[12.5px] transition-all focus:outline-none focus:ring-2 ${
+                        active
+                          ? "bg-violet-600 text-white shadow focus:ring-violet-600/60"
+                          : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50 focus:ring-gray-300/60"
+                      }`}
+                    >
+                      {filter}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Search */}
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Search sessions"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  data-testid="input-search"
+                  className="h-9 w-64 rounded-md border border-gray-200 bg-white pl-9 pr-3 text-[14px] shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-violet-500/60"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main */}
       <div className="mx-auto max-w-6xl px-6 py-6">
         {sessions.length === 0 ? (
-          /* Empty State */
           <div className="flex flex-col items-center justify-center py-24">
-            <div className="w-20 h-20 rounded-2xl bg-gray-50 flex items-center justify-center mb-4">
-              <FileText className="w-10 h-10" style={{ color: "#d1d5db" }} />
+            <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-2xl bg-white shadow-sm">
+              <FileText className="h-10 w-10 text-gray-300" />
             </div>
-            <h3 className="mb-2" style={{ color: "#111827", fontSize: "18px", fontWeight: 600 }}>
-              No sessions yet
-            </h3>
-            <p className="mb-6" style={{ color: "#6b7280", fontSize: "14px" }}>
-              Click 'Start new session' to begin tracking sentiment
-            </p>
+            <h3 className="mb-2 text-[18px] font-semibold text-gray-900">No sessions yet</h3>
+            <p className="mb-6 text-[14px] text-gray-500">Click ‘Start new session’ to begin tracking sentiment</p>
             <button
               onClick={onStartSession}
               data-testid="button-empty-start"
-              className="px-4 py-2 rounded-lg bg-black text-white hover:bg-gray-800 active:translate-y-[1px] transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-black/80 focus:ring-offset-2"
-              style={{ fontSize: "14px", minHeight: "44px" }}
+              className="min-h-[44px] rounded-lg bg-violet-600 px-4 py-2 text-white shadow hover:bg-violet-700 active:translate-y-[1px] focus:outline-none focus:ring-2 focus:ring-violet-600/60"
+              style={{ fontSize: "14px" }}
             >
               Start new session
             </button>
           </div>
         ) : (
           <div className="flex gap-6">
-            {/* Main Content */}
-            <main className="flex-1 min-w-0">
-              {/* Section Header */}
-              <div className="mb-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <h2 style={{ fontSize: "18px", fontWeight: 600, color: "#111827" }}>
-                  Your sessions
-                </h2>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {/* Sort Dropdown */}
-                  <select
-                    value={sortBy}
-                    onChange={(e) => setSortBy(e.target.value as SortType)}
-                    data-testid="select-sort"
-                    className="h-9 px-2.5 rounded-md border border-gray-200 hover:bg-gray-50 transition-all duration-120 focus:outline-none focus:ring-2 focus:ring-black/80"
-                    style={{ fontSize: "13px", color: "#374151" }}
-                  >
-                    <option>Newest first</option>
-                    <option>By title A–Z</option>
-                  </select>
+            {/* Grid */}
+            <main className="min-w-0 flex-1">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {filteredSessions.map((session) => {
+                  const name = displayName(session);
+                  return (
+                    <div
+  key={session.id}
+  data-testid={`card-session-${session.id}`}
+  onClick={() => onOpenSession(session.id)}
+  className="
+    group cursor-pointer rounded-2xl border border-gray-100 bg-white p-4
+    shadow-sm transition-all duration-200
+    hover:-translate-y-[1px]
+    hover:border-violet-400/50
+    hover:ring-2 hover:ring-violet-500/40 hover:ring-offset-2 hover:ring-offset-[#f7f8fb]
+    hover:shadow-lg hover:shadow-violet-500/20
+    focus-within:ring-2 focus-within:ring-violet-500/60 focus-within:ring-offset-2 focus-within:ring-offset-[#f7f8fb]
+  "
+>
 
-                  {/* Filter Pills */}
-                  <div className="hidden sm:flex gap-1">
-                    {(["All", "Recent", "Favorites", "This week"] as FilterType[]).map((filter) => (
-                      <button
-                        key={filter}
-                        onClick={() => setActiveFilter(filter)}
-                        data-testid={`button-filter-${filter.toLowerCase().replace(" ", "-")}`}
-                        className={`px-2.5 py-1.5 rounded-md border transition-all duration-120 focus:outline-none focus:ring-2 focus:ring-black/80 ${
-                          activeFilter === filter
-                            ? "bg-gray-100 border-gray-300"
-                            : "border-gray-200 hover:bg-gray-50"
-                        }`}
-                        style={{ fontSize: "13px", color: "#374151" }}
-                      >
-                        {filter}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Search */}
-                  <div className="relative">
-                    <Search
-                      className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
-                      style={{ color: "#9ca3af" }}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Search sessions"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      data-testid="input-search"
-                      className="h-9 w-56 rounded-md border border-gray-200 pl-9 pr-3 transition-all duration-120 focus:outline-none focus:ring-2 focus:ring-black/80"
-                      style={{ fontSize: "14px" }}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Session Grid */}
-              <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredSessions.map((session) => (
-                  <div
-                    key={session.id}
-                    data-testid={`card-session-${session.id}`}
-                    className="rounded-xl border hover:shadow-sm transition-all duration-150 p-4 cursor-pointer"
-                    style={{ borderColor: "#e5e7eb" }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.borderColor = "#d1d5db";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.borderColor = "#e5e7eb";
-                    }}
-                    onClick={() => onOpenSession(session.id)}
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      {renamingSessionId === session.id ? (
-                        <Input
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
-                          onKeyDown={(e) => handleRenameKeyDown(e, session.id)}
-                          onBlur={() => handleRenameSubmit(session.id)}
-                          onClick={(e) => e.stopPropagation()}
-                          data-testid={`input-rename-${session.id}`}
-                          autoFocus
-                          className="h-8 px-2 -ml-2"
-                          style={{ fontSize: "16px" }}
-                        />
-                      ) : (
-                        <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                          <h3 className="truncate" style={{ fontSize: "16px", fontWeight: 500, color: "#111827" }} data-testid={`text-session-name-${session.id}`}>
-                            {session.name}
-                          </h3>
-                          {session.isFavorite && (
-                            <Star className="w-4 h-4 flex-shrink-0 fill-amber-400 text-amber-400" data-testid={`icon-favorite-${session.id}`} />
-                          )}
-                        </div>
-                      )}
-                      
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <button
-                            className="p-2 rounded-md hover:bg-gray-100 transition-colors duration-100 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-black/80"
-                            onClick={(e) => e.stopPropagation()}
-                            data-testid={`button-menu-${session.id}`}
-                          >
-                            <MoreVertical className="w-4 h-4" style={{ color: "#9ca3af" }} />
-                          </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={(e) => {
-                            e.stopPropagation();
-                            handleRenameClick(session, e as any);
-                          }} data-testid={`menu-rename-${session.id}`}>
-                            <Edit3 className="w-4 h-4 mr-2" />
-                            Rename
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={(e) => {
-                            e.stopPropagation();
-                            toggleFavoriteMutation.mutate({ sessionId: session.id, isFavorite: session.isFavorite });
-                          }} data-testid={`menu-favorite-${session.id}`}>
-                            <Star className="w-4 h-4 mr-2" />
-                            {session.isFavorite ? "Remove from favorites" : "Add to favorites"}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem 
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (confirm("Are you sure you want to delete this session?")) {
-                                deleteMutation.mutate(session.id);
+                      <div className="mb-2 flex items-start justify-between">
+                        {renamingSessionId === session.id ? (
+                          <Input
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") submitRename(session.id);
+                              if (e.key === "Escape") {
+                                setRenamingSessionId(null);
+                                setRenameValue("");
                               }
                             }}
-                            data-testid={`menu-delete-${session.id}`}
-                            className="text-red-600"
-                          >
-                            <Trash2 className="w-4 h-4 mr-2" />
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                            onBlur={() => submitRename(session.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            data-testid={`input-rename-${session.id}`}
+                            autoFocus
+                            className="h-8 -ml-2 px-2"
+                            style={{ fontSize: 16 }}
+                          />
+                        ) : (
+                          <div className="min-w-0 flex flex-1 items-center gap-1.5">
+                            <h3 className="truncate text-[16px] font-medium text-gray-900" data-testid={`text-session-name-${session.id}`}>
+                              {name}
+                            </h3>
+                            {session.isFavorite && (
+                              <Star
+                                className="h-4 w-4 flex-shrink-0 fill-amber-400 text-amber-400"
+                                data-testid={`icon-favorite-${session.id}`}
+                                aria-label="Favorite"
+                              />
+                            )}
+                          </div>
+                        )}
+
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              onClick={(e) => e.stopPropagation()}
+                              data-testid={`button-menu-${session.id}`}
+                              aria-label="Open session menu"
+                              className="flex-shrink-0 rounded-md p-2 transition-colors duration-100 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-violet-500/60"
+                            >
+                              <MoreVertical className="h-4 w-4 text-gray-400" />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startRename(session, e as any);
+                              }}
+                              data-testid={`menu-rename-${session.id}`}
+                            >
+                              <Edit3 className="mr-2 h-4 w-4" />
+                              Rename
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleFavoriteMutation.mutate({
+                                  sessionId: session.id,
+                                  isFavorite: session.isFavorite,
+                                });
+                              }}
+                              data-testid={`menu-favorite-${session.id}`}
+                            >
+                              <Star className="mr-2 h-4 w-4" />
+                              {session.isFavorite ? "Remove from favorites" : "Add to favorites"}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (confirm("Delete this session?")) deleteMutation.mutate(session.id);
+                              }}
+                              data-testid={`menu-delete-${session.id}`}
+                              className="text-red-600"
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+
+                      <p className="text-sm text-gray-500" data-testid={`text-session-time-${session.id}`}>
+                        {session.date} • {session.time}
+                      </p>
+
+                      <div className="mt-3 h-[1px] w-full bg-gradient-to-r from-transparent via-gray-200 to-transparent" />
+                      <div className="mt-2 text-[12px] text-gray-500">Click to view emotions, transcript & AI summary</div>
                     </div>
-                    <p className="text-sm" style={{ color: "#6b7280" }} data-testid={`text-session-time-${session.id}`}>
-                      {session.date} • {session.time}
-                    </p>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </main>
 
-            {/* Sidebar with Tips */}
-            <aside className="hidden lg:block w-72 flex-shrink-0">
-              <div className="sticky top-6 rounded-xl border p-4" style={{ borderColor: "#e5e7eb", backgroundColor: "#fafafa" }}>
-                <h3 className="mb-2" style={{ fontSize: "14px", fontWeight: 600, color: "#111827" }}>
-                  💡 Daily Tip
-                </h3>
-                <p style={{ fontSize: "14px", color: "#6b7280", lineHeight: "1.5" }}>
-                  {todaysTip}
-                </p>
+            {/* Sidebar – lighter, calmer */}
+            <aside className="hidden w-72 flex-shrink-0 lg:block">
+              <div className="sticky top-6 space-y-4">
+                <div className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+                  <h3 className="mb-1.5 text-[14px] font-semibold text-gray-900">💡 Daily Tip</h3>
+                  <p className="text-[14px] leading-6 text-gray-600">
+                    {TIPS[new Date().getDate() % TIPS.length]}
+                  </p>
+                </div>
               </div>
             </aside>
           </div>

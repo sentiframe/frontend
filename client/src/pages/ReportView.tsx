@@ -14,10 +14,98 @@ import {
   ReferenceArea,
   Legend,
 } from "recharts";
-import { Download, Trash2, ArrowLeft } from "lucide-react";
+import { Download, Trash2, ArrowLeft, Play, Pause, RefreshCw } from "lucide-react";
+import { useQuery, UseQueryResult } from "@tanstack/react-query";
 import type { Session, EmotionDataPoint } from "@shared/schema";
 import type { PersonEmotionBreakdown } from "@/lib/sessions";
 
+/** ---------- API TYPES ---------- */
+type SummaryStatus = "processing" | "completed" | "error" | "not_found";
+
+interface TranscriptSegment {
+  timestamp: string; // "MM:SS"
+  text: string;
+}
+
+interface HighlightedSegment {
+  segment_id: number;
+  exact_text: string;
+  reason_for_selection: string;
+}
+
+interface AudioSegment {
+  exact_text: string;
+  audio_file_url: string; // may be relative
+  file_size_kb: number;
+}
+
+interface SummaryCompletedResult {
+  cleaned_transcript: TranscriptSegment[];
+  highlighted_segments: HighlightedSegment[];
+  audio_segments: AudioSegment[];
+  metadata: {
+    total_segments: number;
+    critical_segments_count: number;
+    audio_files_generated: number;
+    voice_tonality: string;
+  };
+}
+
+interface SummaryResponse {
+  status: SummaryStatus;
+  session_name: string;
+  result?: SummaryCompletedResult;
+  error?: string;
+  started_at?: string;
+  generated_at?: string;
+}
+
+/** ---------- NGROK CONFIG ---------- */
+const API_BASE =
+  (import.meta as any)?.env?.VITE_NGROK_BASE_URL ||
+  "https://7782ac3462c8.ngrok-free.app";
+
+/** Join base + path safely */
+function joinUrl(base: string, path: string) {
+  if (!path) return base;
+  try {
+    const u = new URL(path);
+    return u.toString(); // already absolute
+  } catch {
+    const b = base.endsWith("/") ? base.slice(0, -1) : base;
+    const p = path.startsWith("/") ? path : `/${path}`;
+    return `${b}${p}`;
+  }
+}
+
+/** Common headers to skip ngrok warning */
+const NGROK_HEADERS: HeadersInit = {
+  "ngrok-skip-browser-warning": "true",
+};
+
+/** Fetcher that hits ngrok backend */
+async function fetchSummary(sessionName: string): Promise<SummaryResponse> {
+  const url = joinUrl(API_BASE, `/api/summary/${encodeURIComponent(sessionName)}`);
+  const res = await fetch(url, {
+    method: "GET",
+    headers: NGROK_HEADERS,
+    cache: "no-store",
+  });
+
+  if (res.status === 404) {
+    return { status: "not_found", session_name: sessionName };
+  }
+
+  let data: any;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error("Non-JSON response — check ngrok or backend output.");
+  }
+  return data as SummaryResponse;
+}
+
+/** ---------- EXISTING TYPES/CONSTS ---------- */
 interface ReportViewProps {
   session: Session;
   onBackToDashboard: () => void;
@@ -27,15 +115,7 @@ interface ReportViewProps {
 type EmotionType = "Happy" | "Sad" | "Angry" | "Fear" | "Surprise" | "Disgust" | "Neutral";
 type EmotionSelection = "Dominant" | "All" | EmotionType;
 
-const EMOTION_KEYS: EmotionType[] = [
-  "Happy",
-  "Sad",
-  "Angry",
-  "Fear",
-  "Surprise",
-  "Disgust",
-  "Neutral",
-];
+const EMOTION_KEYS: EmotionType[] = ["Happy", "Sad", "Angry", "Fear", "Surprise", "Disgust", "Neutral"];
 
 const EMOTION_COLORS: Record<Exclude<EmotionType, "All">, string> = {
   Happy: "#F59E0B",
@@ -105,9 +185,56 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   );
 };
 
+/** ---------- HELPER: map highlights -> transcript rows with audio ---------- */
+type TranscriptRow = TranscriptSegment & {
+  isHighlighted: boolean;
+  highlight?: HighlightedSegment;
+  audio?: AudioSegment;
+};
+
+function stitchTranscript(
+  transcript: TranscriptSegment[],
+  highlights: HighlightedSegment[],
+  audios: AudioSegment[]
+): TranscriptRow[] {
+  const rows: TranscriptRow[] = transcript.map((seg) => ({ ...seg, isHighlighted: false }));
+
+  highlights.forEach((h) => {
+    const idx = rows.findIndex((r) => r.text.includes(h.exact_text));
+    if (idx >= 0) {
+      rows[idx].isHighlighted = true;
+      rows[idx].highlight = h;
+    }
+  });
+
+  audios.forEach((a) => {
+    const idx = rows.findIndex((r) => r.text.includes(a.exact_text));
+    if (idx >= 0) {
+      rows[idx].audio = a;
+    }
+  });
+
+  return rows;
+}
+
+/** ===================== MAIN COMPONENT ===================== */
 export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewProps) {
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
   const [selectedEmotion, setSelectedEmotion] = useState<EmotionSelection>("Dominant");
+  const [playingSrc, setPlayingSrc] = useState<string | null>(null);
+
+  /** -------- Summary polling from backend -------- */
+  const query: UseQueryResult<SummaryResponse, Error> = useQuery<SummaryResponse, Error>({
+    queryKey: ["summary", session.name],
+    queryFn: () => fetchSummary(session.name),
+    // Poll while processing; stop when completed/error/not_found
+    refetchInterval: (data) => (data?.status === "processing" ? 2000 : false),
+    refetchOnWindowFocus: false,
+  });
+
+  const summaryData = query.data; // <-- this is the SummaryResponse (may be undefined initially)
+  const isFetching = query.isFetching;
+  const refetch = query.refetch;
 
   const rawEmotionData = session.emotionData || [];
   const rawCriticalMoments = session.criticalMoments || [];
@@ -127,12 +254,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
         emotionData: [] as EnrichedPoint[],
         dominantSegments: [] as DominantSegment[],
         dominantEmotionSummary: { emotion: "Neutral" as EmotionType, value: 0 },
-        stats: {
-          points: 0,
-          volatility: 0,
-          transitions: 0,
-          peak: 0,
-        },
+        stats: { points: 0, volatility: 0, transitions: 0, peak: 0 },
       };
     }
 
@@ -187,14 +309,10 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
     };
 
     const smoothed = smooth(downsample(rawEmotionData)).map((point) => {
-      const dominant = EMOTION_KEYS
-        .map((emotion) => ({ emotion, value: point[emotion] }))
-        .reduce((prev, curr) => (curr.value > prev.value ? curr : prev));
-      return {
-        ...point,
-        dominantEmotion: dominant.emotion,
-        dominantValue: dominant.value,
-      } as EnrichedPoint;
+      const dominant = EMOTION_KEYS.map((emotion) => ({ emotion, value: point[emotion] })).reduce((prev, curr) =>
+        curr.value > prev.value ? curr : prev
+      );
+      return { ...point, dominantEmotion: dominant.emotion, dominantValue: dominant.value } as EnrichedPoint;
     });
 
     const segments: DominantSegment[] = [];
@@ -214,13 +332,19 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
       value: smoothed.reduce((sum, point) => sum + point[emotion], 0) / smoothed.length,
     })).sort((a, b) => b.value - a.value);
 
-    const volatility = smoothed.length > 1
-      ? smoothed.slice(1).reduce((sum, point, idx) => {
-          const prev = smoothed[idx];
-          const delta = EMOTION_KEYS.reduce((acc, emotion) => acc + Math.abs(point[emotion] - prev[emotion]), 0) / EMOTION_KEYS.length;
-          return sum + delta;
-        }, 0) / (smoothed.length - 1)
-      : 0;
+    const volatility =
+      smoothed.length > 1
+        ? smoothed
+            .slice(1)
+            .reduce((sum, point, idx) => {
+              const prev = smoothed[idx];
+              const delta =
+                EMOTION_KEYS.reduce((acc, emotion) => acc + Math.abs(point[emotion] - prev[emotion]), 0) /
+                EMOTION_KEYS.length;
+              return sum + delta;
+            }, 0) /
+          (smoothed.length - 1)
+        : 0;
 
     const peak = Math.max(...smoothed.map((point) => point.dominantValue));
 
@@ -231,12 +355,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
         emotion: (averages[0]?.emotion ?? "Neutral") as EmotionType,
         value: averages[0]?.value ?? 0,
       },
-      stats: {
-        points: smoothed.length,
-        volatility,
-        transitions: Math.max(0, segments.length - 1),
-        peak,
-      },
+      stats: { points: smoothed.length, volatility, transitions: Math.max(0, segments.length - 1), peak },
     };
   }, [rawEmotionData]);
 
@@ -351,6 +470,18 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
   const domBorder = hexToRgba(dominantHex, 0.28);
   const domDot = dominantHex;
 
+  /** ---------- Transcript + Highlights stitched ---------- */
+  const rows: TranscriptRow[] = useMemo(() => {
+    if (summaryData?.status !== "completed" || !summaryData.result) return [];
+    return stitchTranscript(
+      summaryData.result.cleaned_transcript ?? [],
+      summaryData.result.highlighted_segments ?? [],
+      summaryData.result.audio_segments ?? []
+    );
+  }, [summaryData]);
+
+  const summaryStatus: SummaryStatus = summaryData?.status ?? "processing";
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100">
       <header className="border-b border-slate-200/70 bg-white/90 backdrop-blur px-8 py-6">
@@ -377,6 +508,16 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
             </div>
           </div>
           <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => refetch()}
+              className="border-slate-200"
+              disabled={isFetching}
+              data-testid="button-refresh"
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${isFetching ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
             <Button variant="outline" onClick={handleExport} data-testid="button-export" className="border-slate-200">
               <Download className="mr-2 h-4 w-4" />
               Export CSV
@@ -400,19 +541,15 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
 
       <main className="mx-auto max-w-7xl space-y-10 px-8 py-12">
         <section className="grid grid-cols-1 gap-6 md:grid-cols-4">
-          {/* Modern gradient TOP-LEFT card; keep numbers/headings black for clarity */}
           <Card
             className="p-6 shadow-sm border"
             style={{
               borderColor: domBorder,
-              background:
-                `linear-gradient(135deg, ${domBgStrong} 0%, ${domBgSoft} 40%, rgba(255,255,255,0.65) 100%)`,
+              background: `linear-gradient(135deg, ${domBgStrong} 0%, ${domBgSoft} 40%, rgba(255,255,255,0.65) 100%)`,
               backdropFilter: "blur(2px)",
             }}
           >
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-800">
-              Dominant Emotion
-            </p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-800">Dominant Emotion</p>
             <div className="mt-2 flex items-center gap-2">
               <span className="h-3 w-3 rounded-full" style={{ backgroundColor: domDot }} />
               <p className="text-3xl font-semibold text-slate-900" data-testid="text-dominant">
@@ -420,9 +557,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
               </p>
             </div>
             <div className="mt-2 inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-xs bg-white/70 text-slate-900">
-              <span className="font-medium">
-                {(dominantEmotionSummary.value * 100).toFixed(1)}%
-              </span>
+              <span className="font-medium">{(dominantEmotionSummary.value * 100).toFixed(1)}%</span>
               <span className="opacity-70">mean intensity</span>
             </div>
           </Card>
@@ -434,6 +569,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
             </p>
             <p className="text-sm text-slate-500">Session length</p>
           </Card>
+
           <Card className="border border-slate-200/60 bg-white/80 p-6 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Data Points</p>
             <p className="mt-2 text-3xl font-semibold text-slate-900" data-testid="text-datapoints">
@@ -441,6 +577,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
             </p>
             <p className="text-sm text-slate-500">After smoothing/downsampling</p>
           </Card>
+
           <Card className="border border-slate-200/60 bg-white/80 p-6 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Transitions</p>
             <p className="mt-2 text-3xl font-semibold text-slate-900">{stats.transitions}</p>
@@ -449,13 +586,12 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
         </section>
 
         <section className="grid grid-cols-1 gap-8 lg:grid-cols-[2fr_1fr]">
+          {/* ======= Left: Charts ======= */}
           <Card className="overflow-hidden border border-slate-200/60 bg-white/90 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-4 px-8 pt-8">
               <div>
                 <h3 className="text-lg font-semibold text-slate-900">Emotion Trajectory</h3>
-                <p className="text-sm text-slate-500">
-                  Smoothed sentiment layers with dominant-emotion overlays
-                </p>
+                <p className="text-sm text-slate-500">Smoothed sentiment layers with dominant-emotion overlays</p>
               </div>
               <div className="flex flex-wrap gap-2">
                 {(["Dominant", "All", ...EMOTION_KEYS] as EmotionSelection[]).map((emotion) => (
@@ -478,7 +614,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                   data={emotionData}
                   margin={{ top: 20, right: 40, left: 0, bottom: 0 }}
                   onMouseMove={(state) => {
-                    const label = state?.activeLabel;
+                    const label = (state as any)?.activeLabel;
                     setSelectedTime(typeof label === "number" ? label : label != null ? Number(label) : null);
                   }}
                   onMouseLeave={() => setSelectedTime(null)}
@@ -514,12 +650,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                       x={selectedTime}
                       stroke="#94a3b8"
                       strokeDasharray="4 4"
-                      label={{
-                        value: formatTimestamp(selectedTime),
-                        position: "top",
-                        fill: "#475569",
-                        fontSize: 12,
-                      }}
+                      label={{ value: formatTimestamp(selectedTime), position: "top", fill: "#475569", fontSize: 12 }}
                     />
                   )}
 
@@ -535,13 +666,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                   ))}
 
                   {emotionData.length > 0 && (
-                    <Area
-                      type="monotone"
-                      dataKey="dominantValue"
-                      stroke="none"
-                      fill="url(#dominantGradient)"
-                      isAnimationActive={false}
-                    />
+                    <Area type="monotone" dataKey="dominantValue" stroke="none" fill="url(#dominantGradient)" isAnimationActive={false} />
                   )}
 
                   {lineConfigs.map((config) => (
@@ -639,7 +764,90 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
             )}
           </Card>
 
+          {/* ======= Right: Transcript / Highlights / Audio ======= */}
           <div className="space-y-6">
+            {/* Summary status card */}
+            <Card className="border border-slate-200/60 bg-white/90 p-6 shadow-sm">
+              <h3 className="text-lg font-semibold text-slate-900">Transcript & Highlights</h3>
+              {summaryStatus === "processing" && (
+                <p className="mt-2 text-sm text-slate-600">
+                  Processing transcript for <span className="font-medium">{session.name}</span>… this view will refresh automatically.
+                </p>
+              )}
+              {summaryStatus === "not_found" && (
+                <p className="mt-2 text-sm text-slate-600">
+                  No transcript found yet for <span className="font-medium">{session.name}</span>. Start a summary or try Refresh.
+                </p>
+              )}
+              {summaryStatus === "error" && (
+                <p className="mt-2 text-sm text-red-600">
+                  {summaryData?.error ?? "An unknown error occurred while fetching the summary."}
+                </p>
+              )}
+              {summaryStatus === "completed" && summaryData?.result && (
+                <p className="mt-2 text-sm text-slate-600">
+                  {summaryData.result.metadata.total_segments} lines • {summaryData.result.metadata.critical_segments_count} highlights •{" "}
+                  {summaryData.result.metadata.audio_files_generated} audio clips • voice: {summaryData.result.metadata.voice_tonality}
+                </p>
+              )}
+            </Card>
+
+            {/* Completed view */}
+            {summaryStatus === "completed" && rows.length > 0 && (
+              <Card className="border border-slate-200/60 bg-white/90 p-0 shadow-sm">
+                <div className="max-h-[520px] overflow-auto divide-y divide-slate-100">
+                  {rows.map((row, idx) => {
+                    const audioUrl = row.audio ? joinUrl(API_BASE, row.audio.audio_file_url) : null;
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`flex items-start gap-3 px-4 py-3 ${
+                          row.isHighlighted ? "bg-amber-50/60" : "bg-white"
+                        }`}
+                      >
+                        <div className="shrink-0">
+                          <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+                            {row.timestamp}
+                          </span>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm text-slate-800">{row.text}</p>
+                          {row.isHighlighted && row.highlight && (
+                            <p className="mt-1 text-[12px] text-amber-700">
+                              <span className="font-medium">Why it matters:</span> {row.highlight.reason_for_selection}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {audioUrl && (
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              onClick={() => setPlayingSrc((cur) => (cur === audioUrl ? null : audioUrl))}
+                              className="border-slate-200"
+                              title={playingSrc === audioUrl ? "Pause clip" : "Play clip"}
+                            >
+                              {playingSrc === audioUrl ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* One shared audio element for simplicity */}
+                <audio
+                  src={playingSrc ?? undefined}
+                  autoPlay
+                  onEnded={() => setPlayingSrc(null)}
+                  controls
+                  className="w-full border-t border-slate-200 p-2"
+                />
+              </Card>
+            )}
+
             <Card className="border border-emerald-200/60 bg-white/90 p-6 shadow-sm">
               <h3 className="text-lg font-semibold text-slate-900">AI Technical Assessment</h3>
               {session.aiReport ? (
@@ -661,7 +869,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                 </>
               ) : (
                 <p className="mt-3 text-sm text-slate-600">
-                  We’re ready to ingest transcripts alongside emotional telemetry. Once transcripts land, insights will triangulate linguistic cadence, sentiment volatility, and conversational pivots to surface executive-grade coaching guidance.
+                  We’ll pair transcripts with emotional telemetry to surface objective, non-jargon coaching insights.
                 </p>
               )}
             </Card>
@@ -679,7 +887,6 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
               </div>
             </Card>
 
-            {/* COLOR-CODED Critical Moments with subtle gradient but black text */}
             {criticalMoments.length > 0 && (
               <Card className="border border-slate-200/60 bg-white/90 p-6 shadow-sm">
                 <h3 className="text-lg font-semibold text-slate-900">Critical Moments</h3>
@@ -706,14 +913,9 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                             <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: hex }} />
                             {moment.emotion} spike
                           </span>
-                          <span className="text-xs font-semibold text-slate-700">
-                            {formatTimestamp(moment.time)}
-                          </span>
+                          <span className="text-xs font-semibold text-slate-700">{formatTimestamp(moment.time)}</span>
                         </div>
-                        <div
-                          className="mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[11px]"
-                          style={{ backgroundColor: chip, color: "#0f172a" }}
-                        >
+                        <div className="mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[11px]" style={{ backgroundColor: chip, color: "#0f172a" }}>
                           Intensity {moment.intensity.toFixed(2)}
                         </div>
                       </button>
@@ -742,7 +944,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                       <div className="m-2 h-6 w-6 rounded-full" style={{ backgroundColor: getEmotionColor(emotion) }}></div>
                     </div>
                   </div>
-                  <p className="mt-2 text-xs text-slate-500">Peak { (peak * 100).toFixed(1)}%</p>
+                  <p className="mt-2 text-xs text-slate-500">Peak {(peak * 100).toFixed(1)}%</p>
                 </Card>
               );
             })}
