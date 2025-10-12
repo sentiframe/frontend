@@ -50,6 +50,16 @@ const EMOTION_COLORS: Record<Exclude<EmotionType, "All">, string> = {
 const getEmotionColor = (emotion: EmotionType) =>
   EMOTION_COLORS[emotion as Exclude<EmotionType, "All">] ?? "#94a3b8";
 
+function hexToRgba(hex: string, alpha: number) {
+  const h = hex.replace("#", "");
+  const n = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  const int = parseInt(n, 16);
+  const r = (int >> 16) & 255;
+  const g = (int >> 8) & 255;
+  const b = int & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 type EnrichedPoint = EmotionDataPoint & {
   dominantEmotion: EmotionType;
   dominantValue: number;
@@ -116,7 +126,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
       return {
         emotionData: [] as EnrichedPoint[],
         dominantSegments: [] as DominantSegment[],
-        dominantEmotionSummary: { emotion: "N/A", value: 0 },
+        dominantEmotionSummary: { emotion: "Neutral" as EmotionType, value: 0 },
         stats: {
           points: 0,
           volatility: 0,
@@ -218,7 +228,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
       emotionData: smoothed,
       dominantSegments: segments,
       dominantEmotionSummary: {
-        emotion: averages[0]?.emotion ?? "N/A",
+        emotion: (averages[0]?.emotion ?? "Neutral") as EmotionType,
         value: averages[0]?.value ?? 0,
       },
       stats: {
@@ -259,8 +269,8 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
       stops.push({ offset: "100%", color });
     }
 
-  return { id, stops };
-}, [dominantSegments, emotionData]);
+    return { id, stops };
+  }, [dominantSegments, emotionData]);
 
   const lineConfigs = useMemo(() => {
     if (selectedEmotion === "All") {
@@ -334,6 +344,13 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
     },
   ];
 
+  // color tokens for the top-left dominant card (modern gradient, keep core text black)
+  const dominantHex = getEmotionColor(dominantEmotionSummary.emotion as EmotionType);
+  const domBgStrong = hexToRgba(dominantHex, 0.18);
+  const domBgSoft = hexToRgba(dominantHex, 0.06);
+  const domBorder = hexToRgba(dominantHex, 0.28);
+  const domDot = dominantHex;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100">
       <header className="border-b border-slate-200/70 bg-white/90 backdrop-blur px-8 py-6">
@@ -383,13 +400,33 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
 
       <main className="mx-auto max-w-7xl space-y-10 px-8 py-12">
         <section className="grid grid-cols-1 gap-6 md:grid-cols-4">
-          <Card className="border border-slate-200/60 bg-white/80 p-6 shadow-sm">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Dominant Emotion</p>
-            <p className="mt-2 text-3xl font-semibold text-slate-900" data-testid="text-dominant">
-              {dominantEmotionSummary.emotion}
+          {/* Modern gradient TOP-LEFT card; keep numbers/headings black for clarity */}
+          <Card
+            className="p-6 shadow-sm border"
+            style={{
+              borderColor: domBorder,
+              background:
+                `linear-gradient(135deg, ${domBgStrong} 0%, ${domBgSoft} 40%, rgba(255,255,255,0.65) 100%)`,
+              backdropFilter: "blur(2px)",
+            }}
+          >
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-800">
+              Dominant Emotion
             </p>
-            <p className="text-sm text-slate-500">Mean intensity {(dominantEmotionSummary.value * 100).toFixed(1)}%</p>
+            <div className="mt-2 flex items-center gap-2">
+              <span className="h-3 w-3 rounded-full" style={{ backgroundColor: domDot }} />
+              <p className="text-3xl font-semibold text-slate-900" data-testid="text-dominant">
+                {dominantEmotionSummary.emotion}
+              </p>
+            </div>
+            <div className="mt-2 inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-xs bg-white/70 text-slate-900">
+              <span className="font-medium">
+                {(dominantEmotionSummary.value * 100).toFixed(1)}%
+              </span>
+              <span className="opacity-70">mean intensity</span>
+            </div>
           </Card>
+
           <Card className="border border-slate-200/60 bg-white/80 p-6 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Duration</p>
             <p className="mt-2 text-3xl font-semibold text-slate-900" data-testid="text-duration">
@@ -412,9 +449,7 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
         </section>
 
         <section className="grid grid-cols-1 gap-8 lg:grid-cols-[2fr_1fr]">
-          <Card
-            className="overflow-hidden border border-slate-200/60 bg-white/90 shadow-sm"
-          >
+          <Card className="overflow-hidden border border-slate-200/60 bg-white/90 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-4 px-8 pt-8">
               <div>
                 <h3 className="text-lg font-semibold text-slate-900">Emotion Trajectory</h3>
@@ -568,12 +603,12 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
                         <div key={person.id} className="rounded-xl border border-slate-200/80 bg-slate-50/70 px-4 py-3">
                           <div className="flex items-center justify-between">
                             <span className="text-sm font-semibold text-slate-800">{person.label}</span>
-                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-600">
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
                               <span className="h-2 w-2 rounded-full" style={{ backgroundColor: getEmotionColor(person.dominantEmotion) }}></span>
                               {person.dominantEmotion} {(person.dominantValue * 100).toFixed(0)}%
                             </span>
                           </div>
-                          <div className="mt-2 space-y-1 text-xs text-slate-600">
+                          <div className="mt-2 space-y-1 text-xs text-slate-700">
                             {ranked.map(({ emotion, value }) => (
                               <div key={emotion} className="flex items-center justify-between">
                                 <span>{emotion}</span>
@@ -644,24 +679,46 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
               </div>
             </Card>
 
+            {/* COLOR-CODED Critical Moments with subtle gradient but black text */}
             {criticalMoments.length > 0 && (
-              <Card className="border border-amber-200/60 bg-white/90 p-6 shadow-sm">
+              <Card className="border border-slate-200/60 bg-white/90 p-6 shadow-sm">
                 <h3 className="text-lg font-semibold text-slate-900">Critical Moments</h3>
                 <div className="mt-4 space-y-3">
-                  {criticalMoments.map((moment, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedTime(moment.time)}
-                      className="w-full rounded-xl border border-amber-200/60 bg-amber-50/80 px-4 py-3 text-left text-sm text-amber-900 transition-all hover:border-amber-300 hover:bg-amber-100"
-                      data-testid={`critical-moment-${idx}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium">{moment.emotion} spike</span>
-                        <span className="text-xs font-semibold">{formatTimestamp(moment.time)}</span>
-                      </div>
-                      <div className="mt-1 text-xs opacity-80">Intensity {moment.intensity.toFixed(2)}</div>
-                    </button>
-                  ))}
+                  {criticalMoments.map((moment, idx) => {
+                    const hex = getEmotionColor(moment.emotion as EmotionType);
+                    const gradStrong = hexToRgba(hex, 0.14);
+                    const gradSoft = hexToRgba(hex, 0.06);
+                    const border = hexToRgba(hex, 0.25);
+                    const chip = hexToRgba(hex, 0.16);
+                    return (
+                      <button
+                        key={idx}
+                        onClick={() => setSelectedTime(moment.time)}
+                        className="w-full rounded-xl border px-4 py-3 text-left transition-all hover:brightness-[0.99] active:brightness-95"
+                        style={{
+                          borderColor: border,
+                          background: `linear-gradient(135deg, ${gradStrong} 0%, ${gradSoft} 55%, rgba(255,255,255,0.85) 100%)`,
+                        }}
+                        data-testid={`critical-moment-${idx}`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-slate-900 flex items-center gap-2">
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: hex }} />
+                            {moment.emotion} spike
+                          </span>
+                          <span className="text-xs font-semibold text-slate-700">
+                            {formatTimestamp(moment.time)}
+                          </span>
+                        </div>
+                        <div
+                          className="mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[11px]"
+                          style={{ backgroundColor: chip, color: "#0f172a" }}
+                        >
+                          Intensity {moment.intensity.toFixed(2)}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </Card>
             )}

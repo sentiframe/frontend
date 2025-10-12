@@ -1,7 +1,7 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
 // Dedicated base URL for ngrok-controlled endpoints (start/stop only)
-const NGROK_BASE = ((import.meta as any).env?.VITE_NGROK_BASE_URL || "https://ac34b37e2da9.ngrok-free.app").replace(/\/$/, "");
+const NGROK_BASE = ((import.meta as any).env?.VITE_NGROK_BASE_URL || "https://7782ac3462c8.ngrok-free.app/").replace(/\/$/, "");
 
 function resolveNgrokPath(path: string): string {
   const normalized = path.startsWith("/") ? path : `/${path}`;
