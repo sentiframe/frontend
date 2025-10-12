@@ -11,3 +11,4 @@ vite.config.ts.*
 .env.production
 .env.development
 !.env.example
+client/src/lib/firebase.ts

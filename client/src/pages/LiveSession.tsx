@@ -5,6 +5,9 @@ import { queryClient } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
+import { useOutlierFaces, PersonEmotionBreakdown } from "@/lib/analytics/outliers.ts";
+
+
 import {
   LineChart,
   Line,
@@ -37,7 +40,7 @@ const EMOTION_COLORS: Record<EmotionKey, string> = {
   Sad: "#2563EB",
   Angry: "#EF4444",
   Fear: "#8B5CF6",
-  Surprise: "#FB923C",
+  Surprise: "#EC4899",
   Disgust: "#22C55E",
   Neutral: "#6B7280",
 };
@@ -46,7 +49,6 @@ const EMOTION_COLORS: Record<EmotionKey, string> = {
 const LINE_TYPE: "linear" | "monotone" | "step" | "stepAfter" | "stepBefore" = "linear";
 
 type TranscriptSegment = { time: number; text: string };
-type LocalMoment = CriticalMomentType & { type?: "spike" | "jump" | "switch" };
 
 const REVEAL_CSS = `
 @keyframes wipeReveal {
@@ -70,55 +72,155 @@ const YAxis = RechartsYAxis as ComponentType<YAxisProps>;
 const Tooltip = RechartsTooltip as ComponentType<TooltipProps<number, string>>;
 const ReferenceLine = RechartsReferenceLine as ComponentType<ReferenceLineProps>;
 
-function getDominantKey(point: EmotionDataPoint): EmotionKey {
-  let best: EmotionKey = "Neutral";
-  let val = -Infinity;
-  for (const k of EMOTION_KEYS) {
-    const v = point[k] ?? 0;
+
+// --- utilities ---
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+const EPS = 1e-6;
+
+function rollingMeanStd<T extends Record<string, number>>(
+  data: T[],
+  key: keyof T,
+  i: number,
+  win: number
+) {
+  const start = Math.max(0, i - win + 1);
+  const slice = data.slice(start, i + 1);
+  const vals = slice.map((d) => (Number.isFinite(d[key] as any) ? (d[key] as number) : 0));
+  const mean = vals.reduce((a, b) => a + b, 0) / Math.max(1, vals.length);
+  const variance =
+    vals.reduce((s, v) => s + (v - mean) * (v - mean), 0) / Math.max(1, vals.length - 1);
+  const std = Math.sqrt(Math.max(variance, 0));
+  return { mean, std };
+}
+
+function isLocalPeak(prev: number, curr: number, next: number, prominence: number) {
+  return curr > prev + prominence && curr > next + prominence;
+}
+
+function getDominantKey(p: EmotionDataPoint): EmotionType {
+  let best: EmotionType = "Neutral";
+  let val = -1;
+  for (const e of EMOTION_KEYS) {
+    const v = p[e] ?? 0;
     if (v > val) {
       val = v;
-      best = k;
+      best = e;
     }
   }
   return best;
 }
 
-function detectCriticalMoments(
+type LocalMomentType = "spike" | "jump" | "switch";
+type LocalMoment = {
+  time: number;
+  emotion: EmotionType;
+  intensity: number;
+  description: string;
+  type: LocalMomentType;
+};
+
+type DetectOpts = {
+  window?: number;          // rolling window for mean/std (in points)
+  spikeAbs?: number;        // absolute floor for a spike
+  spikeStd?: number;        // z-score threshold above rolling mean
+  prominence?: number;      // peak must exceed neighbors by this
+  jumpRel?: number;         // |Δ| / max(prev,ε) threshold
+  minSeparationSec?: number;// refractory period between moments (sec)
+  switchHold?: number;      // frames the new dominant must persist
+  switchMinDominant?: number;// confidence floor for dominance
+  requirePrevHold?: number; // NEW: frames the previous dominant must have held
+};
+
+
+// ---------- STRICTER, SHIFTS-ONLY DETECTOR ----------
+export function detectCriticalMoments(
   data: EmotionDataPoint[],
   prevMoments: LocalMoment[] = [],
-  opts = { spike: 0.6, jump: 0.22 }
+  opts: DetectOpts = {}
 ): LocalMoment[] {
-  const moments: LocalMoment[] = [...prevMoments];
-  if (data.length < 3) return moments;
-  const startIdx = Math.max(1, data.length - 120);
-  for (let i = startIdx; i < data.length - 1; i++) {
-    const prev = data[i - 1], curr = data[i], next = data[i + 1];
-    for (const emotion of EMOTION_KEYS) {
-      const p = prev[emotion] ?? 0;
-      const c = curr[emotion] ?? 0;
-      const n = next[emotion] ?? 0;
-      if (c > p && c > n && c >= opts.spike) {
-        moments.push({ time: curr.time, emotion, intensity: c, description: `${emotion} spike`, type: "spike" } as LocalMoment);
-      }
-      const delta = Math.abs(c - p);
-      if (delta >= opts.jump) {
-        moments.push({ time: curr.time, emotion, intensity: c, description: `${emotion} jump (Δ=${delta.toFixed(2)})`, type: "jump" } as LocalMoment);
-      }
-    }
+  const {
+    // tighter baselines even if spikes/jumps were re-enabled later
+    window = 17,
+    spikeAbs = 0.75,
+    spikeStd = 2.0,
+    prominence = 0.20,
+    jumpRel = 0.50,
+    // make moments rarer & more stable
+    minSeparationSec = 6,
+    switchHold = 4,
+    switchMinDominant = 0.50,
+    requirePrevHold = 3,
+  } = opts;
+
+  const out: LocalMoment[] = [...prevMoments];
+  if (data.length < 3) return out;
+
+  // help prevent clusters around the same time
+  const lastTimeByType = new Map<string, number>();
+
+  // we only scan the tail to keep it "live"
+  const start = Math.max(1, data.length - 240); // ~ last few minutes
+  for (let i = start; i < data.length - 1; i++) {
+    const prev = data[i - 1];
+    const curr = data[i];
+    const next = data[i + 1];
+
+    // (Intentionally NOT emitting spikes/jumps anymore — critical moments are *only* dominant switches)
+    // If you ever need to re-enable below, thresholds above are already stricter.
+
+    // --- dominant switch (require previous regime & new regime persistence + confidence) ---
     const dPrev = getDominantKey(prev);
     const dCurr = getDominantKey(curr);
-    if (dPrev !== dCurr) {
-      moments.push({ time: curr.time, emotion: dCurr, intensity: curr[dCurr] ?? 0, description: `Dominant switched ${dPrev} → ${dCurr}`, type: "switch" } as LocalMoment);
+
+    if (dPrev !== dCurr && isEmotionKey(dCurr)) {
+      // 1) ensure previous dominant actually held for a bit
+      let prevHeld = true;
+      for (let k = 1; k <= requirePrevHold && i - k >= 0; k++) {
+        if (getDominantKey(data[i - k]) !== dPrev) {
+          prevHeld = false;
+          break;
+        }
+      }
+
+      // 2) ensure new dominant persists for next `switchHold` frames
+      let newHolds = true;
+      for (let k = 1; k <= switchHold && i + k < data.length; k++) {
+        if (getDominantKey(data[i + k]) !== dCurr) {
+          newHolds = false;
+          break;
+        }
+      }
+
+      const conf = curr[dCurr] ?? 0;
+      if (prevHeld && newHolds && conf >= switchMinDominant) {
+        const key = `switch|${dPrev}->${dCurr}`;
+        const last = lastTimeByType.get(key) ?? -Infinity;
+        if (curr.time - last >= minSeparationSec) {
+          out.push({
+            time: curr.time,
+            emotion: dCurr,
+            intensity: conf,
+            description: `Dominant switched ${dPrev} → ${dCurr}`,
+            type: "switch",
+          });
+          lastTimeByType.set(key, curr.time);
+        }
+      }
     }
   }
+
+  // dedupe (time|type|emotion) and FILTER to shifts only
   const seen = new Set<string>();
-  return moments.filter((m) => {
-    const key = `${m.time}|${m.type ?? "u"}|${m.emotion}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return out
+    .filter((m) => m.type === "switch")
+    .filter((m) => {
+      const key = `${m.time}|${m.type}|${m.emotion}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
+
 
 /** Normalize Firestore transcripts (array OR { "0": {...}, "1": {...} }) */
 function extractTranscriptList(maybeList: any): Array<{ start?: number; end?: number; text?: string }> {
@@ -222,6 +324,54 @@ function computeCurrentDominant(point?: EmotionDataPoint | null): EmotionKey | n
 function colorToGradient(color: string) {
   // Subtle modern gradient; keep text mostly dark
   return `linear-gradient(135deg, ${color}22 0%, ${color}10 45%, #ffffff 100%)`;
+}
+
+
+export function LiveView({ people }: { people: PersonEmotionBreakdown[] }) {
+  const { evaluate } = useOutlierFaces({ consecutive: 3 }); // require 3 frames in a row
+  const liveOutliers = useMemo(() => evaluate(people || []), [people, evaluate]);
+
+  const flaggedIds = liveOutliers.flagged;
+
+  return (
+    <div>
+      {/* Optional group banner */}
+      {liveOutliers.showGroupLowConfidence && (
+        <div className="mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Low confidence across group (live)
+        </div>
+      )}
+
+      {/* Render face tiles */}
+      <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+        {people.map((p) => {
+          const isFlagged = flaggedIds.has(p.id);
+          return (
+            <div
+              key={p.id}
+              className={`rounded-xl border p-3 ${
+                isFlagged ? "border-amber-300 bg-amber-50/70" : "border-slate-200 bg-white"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-slate-800">{p.label}</span>
+                <span className="text-xs text-slate-600">
+                  {(p.dominantValue * 100).toFixed(0)}%
+                </span>
+              </div>
+              <div className="mt-1 text-xs text-slate-500">{p.dominantEmotion}</div>
+
+              {isFlagged && (
+                <div className="mt-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                  Outlier (live)
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 const LiveTranscript: React.FC<{ segments: TranscriptSegment[] }> = ({ segments }) => (
@@ -482,7 +632,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
     setShowCompletionOverlay(true);
     overlayTimeoutRef.current = window.setTimeout(() => {
       window.location.reload();
-    }, 250);
+    }, 5000);
   }, [isEnding, session.id]);
 
   // LIVE chart data (quadratic regression smoothing)
@@ -592,7 +742,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          {/* Left: Chart & Moments */}
+          {/* Left: Chart */}
           <div className="lg:col-span-8 space-y-8">
             <Card className="p-8" style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}>
               <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -613,7 +763,7 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart
                     data={chartData}
-                    margin={{ top: 20, right: 40, left: 0, bottom: 0 }}
+                    margin={{ top: 26, right: 40, left: 0, bottom: 0 }} // +6px top to buffer legend area below
                     onMouseMove={(state) => {
                       const label = (state as any)?.activeLabel;
                       setSelectedTime(typeof label === "number" ? label : label != null ? Number(label) : null);
@@ -676,7 +826,8 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                 )}
               </div>
 
-              <div className="mt-6 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
+              {/* “Legend”/status chips — add explicit buffer above */}
+              <div className="mt-8 pt-2 border-t border-slate-100 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
                 {selectedEmotion === "All"
                   ? EMOTION_KEYS.map((emotion) => (
                       <span key={emotion} className="flex items-center gap-2">
@@ -692,37 +843,10 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                     )}
               </div>
             </Card>
-
-            {allCriticalMomentsLive.length > 0 && (
-              <Card className="p-6" style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}>
-                <h3 className="mb-4" style={{ fontSize: "18px", fontWeight: 600 }}>Critical Moments (Live)</h3>
-                <div className="space-y-3 max-h-[320px] overflow-auto pr-1">
-                  {allCriticalMomentsLive.map((moment, idx) => (
-                    <button
-                      key={`${moment.time}-${idx}`}
-                      onClick={() => setSelectedTime(moment.time)}
-                      className="flex w-full items-center gap-3 rounded-lg border p-3 text-left transition-all hover:bg-gray-50"
-                      style={{ borderColor: `${EMOTION_COLORS[(moment.emotion as EmotionKey) ?? "Neutral"]}55` }}
-                      data-testid={`critical-moment-${idx}`}
-                    >
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: EMOTION_COLORS[(moment.emotion as EmotionKey) ?? "Neutral"] ?? "#94a3b8" }} />
-                      <div className="flex-1">
-                        <p className="text-sm font-medium">
-                          {moment.description ?? `${moment.emotion} event`} • {moment.time.toFixed(2)}s
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {moment.emotion} • Intensity {(moment.intensity ?? 0).toFixed(2)}
-                        </p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </Card>
-            )}
           </div>
 
-          {/* Right: Live Transcript */}
-          <div className="lg:col-span-4">
+          {/* Right: Live Transcript (+ Critical Moments moved below it) */}
+          <div className="lg:col-span-4 space-y-6">
             <Card className="p-6 lg:sticky lg:top-6" style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 style={{ fontSize: "18px", fontWeight: 600 }}>Live Transcript</h3>
@@ -735,6 +859,34 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
                 <LiveTranscript segments={transcript} />
               </div>
             </Card>
+
+            {/* Critical Moments NOW BELOW transcript */}
+            {allCriticalMomentsLive.length > 0 && (
+              <Card className="p-6" style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}>
+                <h3 className="mb-4" style={{ fontSize: "18px", fontWeight: 600 }}>Critical Moments (Shifts)</h3>
+                <div className="space-y-3 max-h-[320px] overflow-auto pr-1">
+                  {allCriticalMomentsLive.map((moment, idx) => (
+                    <button
+                      key={`${moment.time}-${idx}`}
+                      onClick={() => setSelectedTime(moment.time)}
+                      className="flex w-full items-center gap-3 rounded-lg border p-3 text-left transition-all hover:bg-gray-50"
+                      style={{ borderColor: `${EMOTION_COLORS[(moment.emotion as EmotionKey) ?? "Neutral"]}55` }}
+                      data-testid={`critical-moment-${idx}`}
+                    >
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: EMOTION_COLORS[(moment.emotion as EmotionKey) ?? "Neutral"] ?? "#94a3b8" }} />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium">
+                          {moment.description ?? `${moment.emotion} shift`} • {moment.time.toFixed(2)}s
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {moment.emotion} • Confidence {(moment.intensity ?? 0).toFixed(2)}
+                        </p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </Card>
+            )}
           </div>
         </div>
       </main>
@@ -759,8 +911,11 @@ export function LiveSession({ session, onEndSession, onBack }: LiveSessionProps)
 
 /**
  * Notes:
- * - LIVE view: quadratic regression smoothing (buildSmoothedChartData + quadraticSmooth).
- * - Pulsating last nodes per emotion are enabled via dot={createDotRenderer(color)}.
- * - “Overall Sentiment (Live)” module at top tints the container based on current dominant emotion (from latest RAW point).
- * - REPORT view: keep your existing file; use your Taylor polynomial/“natural”/monotone fit as you have it there.
+ * - Critical moments are now stricter and **shifts-only** (dominant switches) with:
+ *   • previous dominant must have held for a few frames
+ *   • new dominant must persist for several frames
+ *   • higher confidence floor and longer separation between moments
+ * - The “Critical Moments” card has been moved **below the Live Transcript**.
+ * - Added extra buffer between chart lines and the legend/status chips via margin/top border.
+ * - LIVE view keeps quadratic regression smoothing and pulsing last nodes.
  */

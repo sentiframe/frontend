@@ -100,7 +100,8 @@
   --emotion-fear: 271 81% 56%;
   --emotion-happy: 38 92% 50%;
   --emotion-sad: 217 91% 60%;
-  --emotion-surprise: 24 95% 53%;
+  /* Surprise: pink */
+  --emotion-surprise: 330 81% 60%;
   --emotion-neutral: 220 9% 46%;
 
   /* Automatically computed borders - intensity can be controlled by the user by the --opaque-button-border-intensity setting */
@@ -222,7 +223,8 @@
   --emotion-fear: 271 81% 65%;
   --emotion-happy: 38 92% 60%;
   --emotion-sad: 217 91% 65%;
-  --emotion-surprise: 24 95% 60%;
+  /* Surprise: pink (dark) */
+  --emotion-surprise: 330 81% 67%;
   --emotion-neutral: 220 9% 60%;
 
   /* Automatically computed borders - intensity can be controlled by the user by the --opaque-button-border-intensity setting */

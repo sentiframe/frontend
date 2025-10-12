@@ -14,7 +14,7 @@ import {
 } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: (import.meta as any).env?.VITE_FIREBASE_API_KEY || "AIzaSyD_NLcJ_VgpajlhDljj5IR42hCcPLbLxEw",
+  apiKey: (import.meta as any).env?.VITE_FIREBASE_API_KEY || "f1480be2408fb6ba2c4a14a952d20ac5bcc62923",
   authDomain: (import.meta as any).env?.VITE_FIREBASE_AUTH_DOMAIN || "sentiframess.firebaseapp.com",
   projectId: (import.meta as any).env?.VITE_FIREBASE_PROJECT_ID || "sentiframess",
   storageBucket: (import.meta as any).env?.VITE_FIREBASE_STORAGE_BUCKET || "sentiframess.firebasestorage.app",

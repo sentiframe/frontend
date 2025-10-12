@@ -1,6 +1,11 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef, useEffect, useCallback } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { computeOutliersOnce } from "@/lib/analytics/outliers";
+import elevenlabsLogo from "@/assets/elevenlabs.png";
+import geminiLogo from "@/assets/google-gemini.png";
+
+
 import {
   ComposedChart,
   Line,
@@ -8,13 +13,12 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
+  Tooltip,  
   ResponsiveContainer,
   ReferenceLine,
   ReferenceArea,
   ReferenceDot,
   Legend,
-  LabelList,
 } from "recharts";
 import { Download, Trash2, ArrowLeft, Play, Pause, RefreshCw } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -90,7 +94,7 @@ async function fetchSummary(sessionName: string): Promise<SummaryResponse> {
   if (ct.includes("text/html")) {
     const text = await res.text();
     throw new Error(
-      `Got HTML instead of JSON from ${url}. Proxy/path likely misconfigured.\n${text.slice(0, 200)}…`
+      `Got HTML instead of JSON from ${url}. Proxy/path likely misconfigured.\n${text.slice(0, 200)}...`
     );
   }
 
@@ -132,7 +136,7 @@ const EMOTION_COLORS: Record<Exclude<EmotionType, "All">, string> = {
   Sad: "#2563EB",
   Angry: "#F87171",
   Fear: "#8B5CF6",
-  Surprise: "#FB923C",
+  Surprise: "#EC4899",
   Disgust: "#22C55E",
   Neutral: "#64748B",
 };
@@ -167,12 +171,16 @@ const formatTimestamp = (seconds: number) => {
   return `${mins.toString().padStart(1, "0")}:${secs.toString().padStart(2, "0")}`;
 };
 
-const CustomTooltip = ({ active, payload, label }: any) => {
+const CustomTooltip = ({ active, payload, label, getShiftLabelAt }: any) => {
   if (!active || !payload?.length) return null;
   const point: EnrichedPoint = payload[0].payload;
   const ranked = EMOTION_KEYS.map((emotion) => ({ emotion, value: point[emotion] }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 3);
+
+  const shiftText = typeof label === "number" && typeof getShiftLabelAt === "function"
+    ? getShiftLabelAt(label)
+    : null;
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white/95 p-4 shadow-xl backdrop-blur">
@@ -192,8 +200,13 @@ const CustomTooltip = ({ active, payload, label }: any) => {
         ))}
       </div>
       <div className="mt-3 rounded-lg bg-slate-100 px-3 py-1 text-xs text-slate-600">
-        Dominant • {point.dominantEmotion} ({(point.dominantValue * 100).toFixed(1)}%)
+        Dominant - {point.dominantEmotion} ({(point.dominantValue * 100).toFixed(1)}%)
       </div>
+      {shiftText && (
+        <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-700">
+          {shiftText}
+        </div>
+      )}
     </div>
   );
 };
@@ -230,6 +243,131 @@ function stitchTranscript(
   return rows;
 }
 
+/** ---------- Critical moment helpers ---------- */
+function getSegmentForTime(segments: DominantSegment[], t: number): DominantSegment | null {
+  for (const s of segments) {
+    if (t >= s.start && t <= s.end) {
+      return s;
+    }
+  }
+  return null;
+}
+
+function findDominantAt(segments: DominantSegment[], t: number): EmotionType {
+  const seg = getSegmentForTime(segments, t);
+  return seg ? seg.emotion : "Neutral";
+}
+
+type CritKind =
+  | { type: "spike" }
+  | { type: "shift"; from: EmotionType; to: EmotionType }
+  | { type: "dominant_nonpeak" };
+
+type CriticalShiftNode = {
+  x: number;
+  y: number;
+  time: number;
+  emotion: EmotionType;
+  label: string;
+  reason: string;
+  intensity: number;
+  from: EmotionType;
+  to: EmotionType;
+};
+
+function classifyMoment(
+  t: number,
+  mEmotion: EmotionType,
+  segments: DominantSegment[],
+  data: EnrichedPoint[]
+): CritKind {
+  const dom = findDominantAt(segments, t);
+  if (dom !== mEmotion) {
+    return { type: "shift", from: dom, to: mEmotion };
+  }
+
+  const seg = getSegmentForTime(segments, t);
+  if (!seg) return { type: "dominant_nonpeak" };
+
+  let maxVal = -Infinity;
+  let atTVal: number | null = null;
+  const EPS = 1e-5;
+
+  for (let i = 0; i < data.length; i++) {
+    const p = data[i];
+    if (p.time < seg.start - EPS || p.time > seg.end + EPS) continue;
+    const v = p[mEmotion];
+    if (v > maxVal) maxVal = v;
+    if (Math.abs(p.time - t) < EPS) {
+      atTVal = v;
+    }
+  }
+
+  if (atTVal == null) {
+    let nearestIdx = -1;
+    let best = Number.MAX_VALUE;
+    for (let i = 0; i < data.length; i++) {
+      const p = data[i];
+      if (p.time < seg.start - EPS || p.time > seg.end + EPS) continue;
+      const d = Math.abs(p.time - t);
+      if (d < best) {
+        best = d;
+        nearestIdx = i;
+      }
+    }
+    if (nearestIdx >= 0) {
+      atTVal = data[nearestIdx][mEmotion];
+    }
+  }
+
+  if (atTVal == null) return { type: "dominant_nonpeak" };
+
+  const isPeak = atTVal >= maxVal - 1e-4;
+  return isPeak ? { type: "spike" } : { type: "dominant_nonpeak" };
+}
+
+function CritBubbleLabel(props: any) {
+  const { viewBox, value } = props;
+  if (!viewBox) return null;
+
+  const paddingX = 8;
+  const radius = 8;
+  const textYShift = -18;
+  const x = viewBox.x;
+  const y = viewBox.y;
+  const text = String(value ?? "");
+  const estCharW = 6.8;
+  const width = Math.max(60, paddingX * 2 + text.length * estCharW);
+  const height = 26;
+  const placeBelow = y < 90;
+  const bubbleY = placeBelow ? y + 10 : y + textYShift - height;
+
+  return (
+    <g>
+      <rect
+        x={x - width / 2}
+        y={bubbleY}
+        width={width}
+        height={height}
+        rx={radius}
+        ry={radius}
+        fill="rgba(255,255,255,0.95)"
+        stroke="#CBD5E1"
+      />
+      <text
+        x={x}
+        y={bubbleY + height / 2 + 4}
+        textAnchor="middle"
+        fontSize={12}
+        fill="#334155"
+        style={{ fontWeight: 600 }}
+      >
+        {text}
+      </text>
+    </g>
+  );
+}
+
 /** ---------- Confidence flags (stats-based; only when > 3 people) ---------- */
 type ConfidenceFlag = {
   personId: string;
@@ -238,50 +376,31 @@ type ConfidenceFlag = {
   note: string;
 };
 
-function computeConfidenceFlags(people: PersonEmotionBreakdown[]): {
-  flags: ConfidenceFlag[];
-  showGroupLowConfidence: boolean;
-} {
-  if (!people || people.length <= 3) {
-    return { flags: [], showGroupLowConfidence: false };
-  }
-  const domVals = people.map((p) => p.dominantValue ?? 0);
-  const mean = domVals.reduce((a, b) => a + b, 0) / domVals.length;
-  const variance =
-    domVals.reduce((s, v) => s + (v - mean) * (v - mean), 0) / Math.max(1, domVals.length - 1);
-  const std = Math.sqrt(variance);
-
-  // Flag outliers: z < -1.5
-  const flags: ConfidenceFlag[] =
-    std > 0
-      ? people
-          .map((p) => {
-            const z = (p.dominantValue - mean) / std;
-            return z < -1.5
-              ? ({
-                  personId: p.id,
-                  type: "low_confidence_outlier",
-                  zScore: z,
-                  note: "Low confidence across emotions (statistical outlier).",
-                } as ConfidenceFlag)
-              : null;
-          })
-          .filter(Boolean) as ConfidenceFlag[]
-      : [];
-
-  // Group-level low confidence: many are soft (dom < 0.35) AND dispersion is healthy.
-  const softCount = domVals.filter((v) => v < 0.35).length;
-  const cv = std / (mean || 1);
-  const showGroupLowConfidence = softCount / domVals.length >= 0.4 && cv >= 0.25;
-
-  return { flags, showGroupLowConfidence };
-}
-
 /** ===================== MAIN COMPONENT ===================== */
 export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewProps) {
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
   const [selectedEmotion, setSelectedEmotion] = useState<EmotionSelection>("Dominant");
   const [playingSrc, setPlayingSrc] = useState<string | null>(null);
+  const chartCardRef = useRef<HTMLDivElement | null>(null);
+  const [flashChart, setFlashChart] = useState(false);
+  const [delayDone, setDelayDone] = useState(true);
+  const delayTimerRef = useRef<number | undefined>(undefined);
+  
+  const [hoveredShift, setHoveredShift] = useState<number | null>(null);
+
+  const restartDelay = useCallback(() => {
+    if (delayTimerRef.current   !== undefined) {
+      window.clearTimeout(delayTimerRef.current);
+    }
+    setDelayDone(false);
+    delayTimerRef.current = window.setTimeout(() => setDelayDone(true), 10000);
+  }, []);
+
+  useEffect(() => {
+    if (!flashChart) return;
+    const timer = window.setTimeout(() => setFlashChart(false), 1200);
+    return () => window.clearTimeout(timer);
+  }, [flashChart]);
 
   /** -------- Summary polling from backend -------- */
   const query = useQuery<SummaryResponse, Error>({
@@ -296,18 +415,50 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
   const refetch = query.refetch;
 
   const rawEmotionData = session.emotionData || [];
-  const rawCriticalMoments = session.criticalMoments || [];
-  const peopleBreakdown = useMemo<PersonEmotionBreakdown[]>(
-    () => (Array.isArray((session as any).peopleBreakdown) ? (session as any).peopleBreakdown : []),
-    [session]
-  );
+  const peopleBreakdown = useMemo<PersonEmotionBreakdown[]>(() => {
+    const raw = (session as any)?.peopleBreakdown;
+    if (!Array.isArray(raw)) return [];
 
-  const criticalMoments = useMemo(() => {
-    if (!rawCriticalMoments.length) return [] as typeof rawCriticalMoments;
-    return [...rawCriticalMoments]
-      .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
-      .slice(0, 3);
-  }, [rawCriticalMoments]);
+    return raw.map((entry: any, idx: number) => {
+      const id = typeof entry?.id === "string" ? entry.id : `person-${idx + 1}`;
+      const label = typeof entry?.label === "string" ? entry.label : id;
+      const dominantEmotionRaw = entry?.dominantEmotion ?? entry?.dominant_emotion;
+      const dominantEmotion = EMOTION_KEYS.includes(dominantEmotionRaw)
+        ? (dominantEmotionRaw as EmotionType)
+        : "Neutral";
+      const dominantValue = typeof entry?.dominantValue === "number"
+        ? entry.dominantValue
+        : typeof entry?.dominant_value === "number"
+        ? entry.dominant_value
+        : 0;
+      const framesObserved = typeof entry?.framesObserved === "number"
+        ? entry.framesObserved
+        : typeof entry?.frames_observed === "number"
+        ? entry.frames_observed
+        : 0;
+
+      const emotions: Record<EmotionType, number> = {} as Record<EmotionType, number>;
+      EMOTION_KEYS.forEach((emotion) => {
+        const source = entry?.emotions ?? {};
+        const candidate = source?.[emotion] ?? source?.[emotion.toLowerCase()];
+        emotions[emotion] = typeof candidate === "number" ? candidate : 0;
+      });
+
+      const notes = Array.isArray(entry?.notes)
+        ? entry.notes.filter((note: unknown) => typeof note === "string")
+        : [];
+
+      return {
+        id,
+        label,
+        dominantEmotion,
+        dominantValue,
+        emotions,
+        framesObserved,
+        notes,
+      };
+    });
+  }, [session]);
 
   const {
     emotionData,
@@ -439,31 +590,49 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
     };
   }, [rawEmotionData]);
 
-  /** --- Critical moment nodes: find y at specific time (nearest point) --- */
-  const criticalNodes = useMemo(() => {
-    if (!emotionData.length || !criticalMoments.length) return [];
+  const criticalShiftNodes = useMemo(() => {
+    if (!emotionData.length || dominantSegments.length < 2) return [] as CriticalShiftNode[];
+
     const idxByTime = (t: number) => {
       let closest = 0;
       let best = Number.MAX_VALUE;
       for (let i = 0; i < emotionData.length; i++) {
-        const d = Math.abs(emotionData[i].time - t);
-        if (d < best) {
-          best = d;
+        const diff = Math.abs(emotionData[i].time - t);
+        if (diff < best) {
+          best = diff;
           closest = i;
         }
       }
       return closest;
     };
-    return criticalMoments.map((m) => {
-      const i = idxByTime(m.time);
-      return {
-        x: emotionData[i].time,
-        y: emotionData[i].dominantValue,
-        emotion: m.emotion as EmotionType,
-        label: `${m.emotion} • ${formatTimestamp(m.time)}`,
-      };
-    });
-  }, [emotionData, criticalMoments]);
+
+    const nodes: CriticalShiftNode[] = [];
+
+    for (let i = 1; i < dominantSegments.length; i++) {
+      const prev = dominantSegments[i - 1];
+      const current = dominantSegments[i];
+      if (prev.emotion === current.emotion) continue;
+      const idx = idxByTime(current.start);
+      const point = emotionData[idx] ?? emotionData[emotionData.length - 1];
+      const y = point?.dominantValue ?? 0;
+      nodes.push({
+        x: point?.time ?? current.start,
+        y,
+        time: current.start,
+        emotion: current.emotion,
+        label: `Shift: ${prev.emotion} -> ${current.emotion}`,
+        reason: `Regime change ${prev.emotion} -> ${current.emotion}`,
+        intensity: Math.max(y, point?.dominantValue ?? 0),
+        from: prev.emotion,
+        to: current.emotion,
+      });
+    }
+
+    nodes.sort((a, b) => b.intensity - a.intensity);
+    return nodes.slice(0, 3);
+  }, [dominantSegments, emotionData]);
+
+  /** --- Critical moment nodes: find y at specific time (nearest point) --- */
 const dominantStrokeGradient = useMemo(() => {
     if (!emotionData.length) {
       return {
@@ -554,6 +723,20 @@ const dominantStrokeGradient = useMemo(() => {
   const domBorder = hexToRgba(dominantHex, 0.28);
   const domDot = dominantHex;
 
+  const getShiftLabelAt = useCallback(
+    (time: number): string | null => {
+      if (!criticalShiftNodes.length) return null;
+      let best: { label: string; dist: number } | null = null;
+      for (const n of criticalShiftNodes) {
+        const dist = Math.abs(n.time - time);
+        if (!best || dist < best.dist) best = { label: n.label, dist };
+      }
+      // Only consider a shift "nearby" if within ~1s
+      return best && best.dist <= 1 ? best.label : null;
+    },
+    [criticalShiftNodes]
+  );
+
   /** ---------- Transcript + Highlights stitched ---------- */
   const rows: TranscriptRow[] = useMemo(() => {
     if (summaryData?.status !== "completed" || !summaryData.result) return [];
@@ -564,16 +747,60 @@ const dominantStrokeGradient = useMemo(() => {
     );
   }, [summaryData]);
   const summaryStatus: SummaryStatus = summaryData?.status ?? "processing";
+  const overlayActive = !delayDone || summaryStatus === "processing";
 
-  /** ---------- Confidence flags ---------- */
-  const { flags: confidenceFlags, showGroupLowConfidence } = useMemo(
-    () => computeConfidenceFlags(peopleBreakdown || []),
+  /** ---------- Outlier snapshot flags ---------- */
+  const outliersReport = useMemo(
+    () => computeOutliersOnce(peopleBreakdown || []),
     [peopleBreakdown]
   );
-  const flaggedIds = new Set(confidenceFlags.map((f) => f.personId));
+  const flaggedIds = outliersReport.flagged ?? new Set<string>();
+  const showGroupLowConfidence = outliersReport.showGroupLowConfidence;
+
+  const findNearestAudioUrlAt = (timeSec: number): string | null => {
+    if (summaryData?.status !== "completed" || !summaryData.result) return null;
+    const audios = summaryData.result.audio_segments ?? [];
+    if (!audios.length) return null;
+
+    const toSeconds = (stamp: string) => {
+      const [mm = "0", ss = "0"] = stamp.split(":");
+      return Number(mm) * 60 + Number(ss);
+    };
+
+    if (!rows.length) return null;
+
+    let bestIdx = -1;
+    let bestDist = Number.MAX_VALUE;
+    rows.forEach((row, idx) => {
+      const diff = Math.abs(toSeconds(row.timestamp) - timeSec);
+      if (diff < bestDist) {
+        bestDist = diff;
+        bestIdx = idx;
+      }
+    });
+    if (bestIdx < 0) return null;
+
+    const text = rows[bestIdx].text;
+    const direct = audios.find((a) => text.includes(a.exact_text));
+    if (direct) return joinUrl(API_BASE, direct.audio_file_url);
+
+    const fallback = audios.find((a) => rows.some((r) => r.text.includes(a.exact_text)));
+    return fallback ? joinUrl(API_BASE, fallback.audio_file_url) : null;
+  };
+
+  const jumpToChart = (timeSec: number) => {
+    setSelectedTime(timeSec);
+    chartCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setFlashChart(true);
+    const audio = findNearestAudioUrlAt(timeSec);
+    if (audio) {
+      setPlayingSrc(audio);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100">
+
       <header className="border-b border-slate-200/70 bg-white/90 backdrop-blur px-8 py-6">
         <div className="mx-auto flex max-w-7xl items-center justify-between">
           <div className="flex items-center gap-4">
@@ -593,14 +820,17 @@ const dominantStrokeGradient = useMemo(() => {
                 {session.name}
               </h2>
               <p className="text-sm text-slate-500" data-testid="text-session-date">
-                {session.date} • {session.time}
+                {session.date} - {session.time}
               </p>
             </div>
           </div>
           <div className="flex gap-2">
             <Button
               variant="outline"
-              onClick={() => refetch()}
+              onClick={() => {
+                restartDelay();
+                refetch();
+              }}
               className="border-slate-200"
               disabled={isFetching}
               data-testid="button-refresh"
@@ -681,7 +911,12 @@ const dominantStrokeGradient = useMemo(() => {
 
         <section className="grid grid-cols-1 gap-8 lg:grid-cols-[2fr_1fr]">
           {/* ======= Left: Charts ======= */}
-          <Card className="overflow-hidden border border-slate-200/60 bg-white/90 shadow-sm">
+          <Card
+            ref={chartCardRef}
+            className={`overflow-hidden border border-slate-200/60 bg-white/90 shadow-sm transition-shadow ${
+              flashChart ? "ring-2 ring-violet-400 shadow-[0_0_0_6px_rgba(139,92,246,0.15)]" : ""
+            }`}
+          >
             <div className="flex flex-wrap items-start justify-between gap-4 px-8 pt-8">
               <div>
                 <h3 className="text-lg font-semibold text-slate-900">Emotion Trajectory</h3>
@@ -712,7 +947,7 @@ const dominantStrokeGradient = useMemo(() => {
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart
                   data={emotionData}
-                  margin={{ top: 20, right: 48, left: 0, bottom: 0 }}
+                  margin={{ top: 20, right: 48, left: 0, bottom: 24 }}
                   onMouseMove={(state) => {
                     const label = (state as any)?.activeLabel;
                     setSelectedTime(
@@ -745,20 +980,15 @@ const dominantStrokeGradient = useMemo(() => {
                     tickFormatter={(value) => `${(value * 100).toFixed(0)}%`}
                     tick={{ fontSize: 12, fill: "#64748B" }}
                   />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend verticalAlign="top" height={32} wrapperStyle={{ paddingBottom: 8 }} />
+                  <Tooltip content={<CustomTooltip getShiftLabelAt={getShiftLabelAt} />} />
+                  <Legend verticalAlign="top" height={50} wrapperStyle={{ paddingBottom: 8 }} />
 
                   {selectedTime !== null && (
                     <ReferenceLine
                       x={selectedTime}
                       stroke="#94a3b8"
                       strokeDasharray="4 4"
-                      label={{
-                        value: formatTimestamp(selectedTime),
-                        position: "top",
-                        fill: "#475569",
-                        fontSize: 12,
-                      }}
+                      label={{ value: formatTimestamp(selectedTime), position: "top", fill: "#475569", fontSize: 12, dy: 10 }}
                     />
                   )}
 
@@ -830,25 +1060,24 @@ const dominantStrokeGradient = useMemo(() => {
                     ));
                   })()}
 
-                  {/* Critical moment nodes (3) */}
-                  {criticalNodes.map((n, i) => (
+                  {/* Critical shift moment nodes */}
+                  {criticalShiftNodes.map((node, idx) => (
                     <ReferenceDot
-                      key={`${n.x}-${i}`}
-                      x={n.x}
-                      y={n.y}
+                      key={`${node.time}-${idx}`}
+                      x={node.x}
+                      y={node.y}
                       r={6}
-                      fill={getEmotionColor(n.emotion)}
+                      fill={getEmotionColor(node.emotion)}
                       stroke="#ffffff"
                       strokeWidth={2}
                       isFront
                       ifOverflow="extendDomain"
-                    >
-                      <LabelList
-                        dataKey="time"
-                        formatter={() => ""}
-                        position="top"
-                      />
-                    </ReferenceDot>
+                      label={hoveredShift === idx ? {
+                        value: node.label,
+                        position: "top",
+                        content: (props: any) => <CritBubbleLabel {...props} />,
+                      } : undefined} onMouseEnter={() => setHoveredShift(idx)} onMouseLeave={() => setHoveredShift(null)}
+                    />
                   ))}
                 </ComposedChart>
               </ResponsiveContainer>
@@ -868,7 +1097,7 @@ const dominantStrokeGradient = useMemo(() => {
                         flex: `${segment.end - segment.start} 0 auto`,
                         opacity: 0.7,
                       }}
-                      title={`${segment.emotion} • ${formatTimestamp(segment.start)} – ${formatTimestamp(
+                      title={`${segment.emotion} * ${formatTimestamp(segment.start)} - ${formatTimestamp(
                         segment.end
                       )}`}
                     />
@@ -887,6 +1116,53 @@ const dominantStrokeGradient = useMemo(() => {
                 </div>
               </div>
             </div>
+
+            {criticalShiftNodes.length > 0 && (
+              <div className="px-8 pb-6">
+                <div className="rounded-2xl border border-slate-200 bg-white/85 p-5 shadow-sm">
+                  <h4 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+                    Critical Moments
+                  </h4>
+                  <div className="mt-3 space-y-3">
+                    {criticalShiftNodes.map((moment, idx) => {
+                      const hex = getEmotionColor(moment.emotion);
+                      const gradStrong = hexToRgba(hex, 0.14);
+                      const gradSoft = hexToRgba(hex, 0.06);
+                      const border = hexToRgba(hex, 0.25);
+                      const chip = hexToRgba(hex, 0.16);
+                      return (
+                        <button
+                          key={`${moment.time}-${idx}`}
+                          onClick={() => jumpToChart(moment.time)}
+                          className="w-full rounded-xl border px-4 py-3 text-left transition-all hover:brightness-[0.99] active:brightness-95"
+                          style={{
+                            borderColor: border,
+                            background: `linear-gradient(135deg, ${gradStrong} 0%, ${gradSoft} 55%, rgba(255,255,255,0.85) 100%)`,
+                          }}
+                          data-testid={`critical-moment-${idx}`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium text-slate-900 flex items-center gap-2">
+                              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: hex }} />
+                              {moment.label}
+                            </span>
+                            <span className="text-xs font-semibold text-slate-700">
+                              {formatTimestamp(moment.time)}
+                            </span>
+                          </div>
+                          <div
+                            className="mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[11px]"
+                            style={{ backgroundColor: chip, color: "#0f172a" }}
+                          >
+                            Intensity {moment.intensity.toFixed(2)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {peopleBreakdown.length > 0 && (
               <div className="px-8 pb-8">
@@ -908,19 +1184,28 @@ const dominantStrokeGradient = useMemo(() => {
                   </div>
 
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
-                    {peopleBreakdown.map((person) => {
+                    {peopleBreakdown.map((person: PersonEmotionBreakdown) => {
+                      const emotions = person.emotions ?? ({} as Record<EmotionType, number>);
+                      const notes = Array.isArray(person.notes) ? person.notes : [];
+                      const dominantEmotion = person.dominantEmotion ?? "Neutral";
+                      const dominantValue =
+                        typeof person.dominantValue === "number" ? person.dominantValue : 0;
+                      const framesObserved =
+                        typeof person.framesObserved === "number" ? person.framesObserved : 0;
+                      const displayLabel = person.label ?? "Audience member";
                       const ranked = EMOTION_KEYS.map((emotion) => ({
                         emotion,
-                        value: person.emotions[emotion] || 0,
+                        value: emotions[emotion] ?? 0,
                       }))
                         .sort((a, b) => b.value - a.value)
                         .slice(0, 3);
 
-                      const isFlagged = flaggedIds.has(person.id);
+                      const personId = person.id ?? displayLabel;
+                      const isFlagged = flaggedIds.has(personId);
 
                       return (
                         <div
-                          key={person.id}
+                          key={personId}
                           className={`rounded-xl border px-4 py-3 ${
                             isFlagged
                               ? "border-amber-300 bg-amber-50/70"
@@ -929,14 +1214,14 @@ const dominantStrokeGradient = useMemo(() => {
                         >
                           <div className="flex items-center justify-between">
                             <span className="text-sm font-semibold text-slate-800">
-                              {person.label}
+                              {displayLabel}
                             </span>
                             <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
                               <span
                                 className="h-2 w-2 rounded-full"
-                                style={{ backgroundColor: getEmotionColor(person.dominantEmotion) }}
+                                style={{ backgroundColor: getEmotionColor(dominantEmotion) }}
                               />
-                              {person.dominantEmotion} {(person.dominantValue * 100).toFixed(0)}%
+                              {dominantEmotion} {(dominantValue * 100).toFixed(0)}%
                             </span>
                           </div>
 
@@ -950,25 +1235,26 @@ const dominantStrokeGradient = useMemo(() => {
 
                             <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-slate-400">
                               <span>Frames</span>
-                              <span>{person.framesObserved}</span>
+                              <span>{framesObserved}</span>
                             </div>
                           </div>
 
-                          {/* Notes + statistical flag */}
-                          <ul className="mt-2 space-y-1 text-[11px]">
-                            {person.notes.map((note, idx) => (
-                              <li key={idx} className="flex items-start gap-1 text-amber-700">
-                                <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-amber-500" />
-                                <span>{note}</span>
-                              </li>
-                            ))}
-                            {isFlagged && (
-                              <li className="flex items-start gap-1 text-amber-800">
-                                <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-amber-600" />
-                                <span>Low confidence outlier (z &lt; −1.5).</span>
-                              </li>
-                            )}
-                          </ul>
+                          {notes.length > 0 && (
+                            <ul className="mt-2 space-y-1 text-[11px] text-amber-700">
+                              {notes.map((note: string, idx: number) => (
+                                <li key={`${personId}-note-${idx}`} className="flex items-start gap-1">
+                                  <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-amber-500" />
+                                  <span>{note}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+
+                          {isFlagged && (
+                            <div className="mt-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                              Outlier (low confidence / high entropy)
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -981,36 +1267,22 @@ const dominantStrokeGradient = useMemo(() => {
           {/* ======= Right: Transcript / Highlights / Audio ======= */}
           <div className="space-y-6">
             {/* Summary status card */}
-            <Card className="border border-slate-200/60 bg-white/90 p-6 shadow-sm">
-              <h3 className="text-lg font-semibold text-slate-900">Transcript & Highlights</h3>
-              {summaryStatus === "processing" && (
-                <p className="mt-2 text-sm text-slate-600">
-                  Processing transcript for <span className="font-medium">{session.name}</span>… this view will refresh automatically.
-                </p>
-              )}
-              {summaryStatus === "not_found" && (
-                <p className="mt-2 text-sm text-slate-600">
-                  No transcript found yet for <span className="font-medium">{session.name}</span>. Start a summary or try Refresh.
-                </p>
-              )}
-              {summaryStatus === "error" && (
-                <p className="mt-2 text-sm text-red-600">
-                  {summaryData?.error ?? "An unknown error occurred while fetching the summary."}
-                </p>
-              )}
-              {summaryStatus === "completed" && summaryData?.result && (
-                <p className="mt-2 text-sm text-slate-600">
-                  {summaryData.result.metadata.total_segments} lines •{" "}
-                  {summaryData.result.metadata.critical_segments_count} highlights •{" "}
-                  {summaryData.result.metadata.audio_files_generated} audio clips • voice:{" "}
-                  {summaryData.result.metadata.voice_tonality}
-                </p>
-              )}
-            </Card>
+
 
             {/* Completed view */}
             {summaryStatus === "completed" && rows.length > 0 && (
               <Card className="border border-slate-200/60 bg-white/90 p-0 shadow-sm">
+                <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="text-xs font-semibold uppercase tracking-widest text-slate-500">Transcript & Highlights Powered by</div>
+                  <div className="mt-2 flex items-center gap-2">
+  <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600">
+    <img src={geminiLogo} alt="google" className="h-8 w-50 object-contain" />
+  </span>
+  <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600">
+    <img src={elevenlabsLogo} alt="elevenlabs" className="h-8 w-20 object-contain" />
+  </span>
+</div>
+                </div>
                 <div className="max-h-[520px] overflow-auto divide-y divide-slate-100">
                   {rows.map((row, idx) => {
                     const audioUrl = row.audio ? joinUrl(API_BASE, row.audio.audio_file_url) : null;
@@ -1078,7 +1350,7 @@ const dominantStrokeGradient = useMemo(() => {
                 {[
                   {
                     title: "Volatility Index",
-                    value: stats.points ? (stats.volatility * 100).toFixed(1) + "%" : "—",
+                    value: stats.points ? (stats.volatility * 100).toFixed(1) + "%" : "--",
                     subtitle: "Avg. absolute change across emotions per second.",
                   },
                   {
@@ -1088,7 +1360,7 @@ const dominantStrokeGradient = useMemo(() => {
                   },
                   {
                     title: "Peak Intensity",
-                    value: stats.points ? (stats.peak * 100).toFixed(1) + "%" : "—",
+                    value: stats.points ? (stats.peak * 100).toFixed(1) + "%" : "--",
                     subtitle: "Highest dominant-emotion confidence observed.",
                   },
                 ].map((item) => (
@@ -1102,49 +1374,6 @@ const dominantStrokeGradient = useMemo(() => {
                 ))}
               </div>
             </Card>
-
-            {criticalMoments.length > 0 && (
-              <Card className="border border-slate-200/60 bg-white/90 p-6 shadow-sm">
-                <h3 className="text-lg font-semibold text-slate-900">Critical Moments</h3>
-                <div className="mt-4 space-y-3">
-                  {criticalMoments.map((moment, idx) => {
-                    const hex = getEmotionColor(moment.emotion as EmotionType);
-                    const gradStrong = hexToRgba(hex, 0.14);
-                    const gradSoft = hexToRgba(hex, 0.06);
-                    const border = hexToRgba(hex, 0.25);
-                    const chip = hexToRgba(hex, 0.16);
-                    return (
-                      <button
-                        key={idx}
-                        onClick={() => setSelectedTime(moment.time)}
-                        className="w-full rounded-xl border px-4 py-3 text-left transition-all hover:brightness-[0.99] active:brightness-95"
-                        style={{
-                          borderColor: border,
-                          background: `linear-gradient(135deg, ${gradStrong} 0%, ${gradSoft} 55%, rgba(255,255,255,0.85) 100%)`,
-                        }}
-                        data-testid={`critical-moment-${idx}`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-slate-900 flex items-center gap-2">
-                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: hex }} />
-                            {moment.emotion} spike
-                          </span>
-                          <span className="text-xs font-semibold text-slate-700">
-                            {formatTimestamp(moment.time)}
-                          </span>
-                        </div>
-                        <div
-                          className="mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[11px]"
-                          style={{ backgroundColor: chip, color: "#0f172a" }}
-                        >
-                          Intensity {moment.intensity.toFixed(2)}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </Card>
-            )}
           </div>
         </section>
 
