@@ -43,12 +43,6 @@ export default defineConfig({
         secure: false,
         rewrite: (path) => path.replace(/^\/ngrok/, ""),
       },
-      "/backend": {
-        target: process.env.VITE_BACKEND_BASE_URL || "http://0.0.0.0:80",
-        changeOrigin: true,
-        secure: false,
-        rewrite: (path) => path.replace(/^\/backend/, ""),
-      },
     },
   },
 });

@@ -1,8 +1,12 @@
 import { useState, useEffect } from "react";
-import { queryClient, ngrokFetch } from "./lib/queryClient";
-import { listSessionsFromFirebase, getSessionByIdFromFirebase, updateSessionMeta } from "@/lib/sessions";
-import { logAllCollections } from "@/lib/firebase";
-import { QueryClientProvider, useMutation } from "@tanstack/react-query";
+import { queryClient } from "./lib/queryClient";
+import {
+  listSessionsFromApi,
+  getSessionByIdFromApi,
+  createSession,
+  stopSession,
+} from "@/lib/sessions";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SessionDashboard } from "@/pages/SessionDashboard";
@@ -28,16 +32,15 @@ function MainApp() {
   const [sessionName, setSessionName] = useState("");
   const [isCreatingSession, setIsCreatingSession] = useState(false);
 
-  // Trigger initial session load from Firebase-backed query
+  // Trigger initial session load from backend query
   useEffect(() => {
     const initializeSessions = async () => {
       if (initialized) return;
 
       try {
-        console.info('[App] Initializing sessions from Firebase...');
-        await logAllCollections();
-        const sessions = await listSessionsFromFirebase();
-        console.info('[App] Sessions loaded from Firebase (count:', sessions.length, '):', sessions);
+        console.info('[App] Fetching sessions from backend...');
+        const sessions = await listSessionsFromApi();
+        console.info('[App] Sessions loaded (count:', sessions.length, '):', sessions);
         sessions.forEach((session) => {
           console.info('[App] Session detail:', session);
         });
@@ -62,45 +65,12 @@ function MainApp() {
     
     setIsCreatingSession(true);
     try {
-      // Call ngrok /start with JSON body: { name }
-      const res = await ngrokFetch(`/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: sessionName.trim() }),
-      });
-      
-      if (res.ok) {
-        const payload = await res.json().catch(() => ({} as any));
-        setShowNameDialog(false);
-        setSessionName("");
-
-        // If ngrok returns an identifier, jump straight into live session
-        const vid = payload?.videoId || payload?.video_id || payload?.id || null;
-        if (vid) {
-          const now = new Date();
-          const newSession: Session = {
-            id: String(vid),
-            name: sessionName.trim(),
-            date: now.toLocaleDateString(),
-            time: now.toLocaleTimeString(),
-            duration: 0,
-            isFavorite: false,
-            videoId: String(vid),
-            emotionData: [],
-          };
-          updateSessionMeta(String(vid), { name: sessionName.trim(), createdAt: now.getTime() });
-          setCurrentSession(newSession);
-          setView({ type: "live-session", session: newSession });
-          queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        } else {
-          // Fallback: return to dashboard
-          queryClient.invalidateQueries({ queryKey: ["sessions"] });
-          setView({ type: "dashboard" });
-        }
-      } else {
-        const error = await res.json();
-        alert(error.error || "Failed to create session. Please try again.");
-      }
+      const created = await createSession(sessionName.trim(), {});
+      setShowNameDialog(false);
+      setSessionName("");
+      setCurrentSession({ ...created, emotionData: [] });
+      setView({ type: "live-session", session: { ...created, emotionData: [] } });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } catch (err) {
       console.error("Error creating session:", err);
       alert("An error occurred while creating the session. Please try again.");
@@ -115,10 +85,7 @@ function MainApp() {
     const session = view.session;
     // Stop via ngrok endpoint (POST with session name for Flask backend)
     try {
-      await ngrokFetch("/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
+      await stopSession(session.id);
     } catch (err) {
       console.error("Error stopping session via ngrok:", err);
     }
@@ -128,7 +95,7 @@ function MainApp() {
 
   const handleOpenSession = async (sessionId: string) => {
     try {
-      const remote = await getSessionByIdFromFirebase(sessionId);
+      const remote = await getSessionByIdFromApi(sessionId);
       if (remote) {
         setCurrentSession(remote);
         if (remote.emotionData && remote.emotionData.length > 0) {

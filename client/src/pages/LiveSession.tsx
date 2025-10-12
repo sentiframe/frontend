@@ -1,8 +1,17 @@
-import { useState, useEffect, useMemo } from "react";
-import { getFrame as getFirebaseFrame } from "@/lib/firebase";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { startSession as startRemoteSession, getSessionByIdFromApi } from "@/lib/sessions";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
 import type { EmotionDataPoint, CriticalMomentType, Session } from "@shared/schema";
 
 interface LiveSessionProps {
@@ -12,127 +21,92 @@ interface LiveSessionProps {
 
 type EmotionType = "All" | "Happy" | "Sad" | "Angry" | "Fear" | "Surprise" | "Disgust" | "Neutral";
 
-const EMOTION_COLORS = {
+const EMOTION_KEYS: EmotionType[] = [
+  "Happy",
+  "Sad",
+  "Angry",
+  "Fear",
+  "Surprise",
+  "Disgust",
+  "Neutral",
+];
+
+const EMOTION_COLORS: Record<Exclude<EmotionType, "All">, string> = {
   Happy: "#F59E0B",
-  Sad: "#3B82F6",
+  Sad: "#2563EB",
   Angry: "#EF4444",
-  Fear: "#A855F7",
-  Surprise: "#F97316",
-  Disgust: "#8B5CF6",
+  Fear: "#8B5CF6",
+  Surprise: "#FB923C",
+  Disgust: "#22C55E",
   Neutral: "#6B7280",
 };
 
-// Custom pulsing dot component
-const PulsingDot = ({ cx, cy, fill }: { cx: number; cy: number; fill: string }) => {
-  return (
-    <g>
-      <circle
-        cx={cx}
-        cy={cy}
-        r={4}
-        fill={fill}
-        className="animate-pulse"
-        style={{ transformBox: "fill-box", transformOrigin: "center" }}
-      />
-      <circle
-        cx={cx}
-        cy={cy}
-        r={8}
-        fill={fill}
-        opacity={0.3}
-        className="animate-ping"
-        style={{ transformBox: "fill-box", transformOrigin: "center" }}
-      />
-    </g>
-  );
-};
+const PulsingDot = ({ cx, cy, fill }: { cx: number; cy: number; fill: string }) => (
+  <g>
+    <circle
+      cx={cx}
+      cy={cy}
+      r={4}
+      fill={fill}
+      className="animate-pulse"
+      style={{ transformBox: "fill-box", transformOrigin: "center" }}
+    />
+    <circle
+      cx={cx}
+      cy={cy}
+      r={8}
+      fill={fill}
+      opacity={0.3}
+      className="animate-ping"
+      style={{ transformBox: "fill-box", transformOrigin: "center" }}
+    />
+  </g>
+);
 
 export function LiveSession({ session, onEndSession }: LiveSessionProps) {
-  const [emotionData, setEmotionData] = useState<EmotionDataPoint[]>([]);
-  const [criticalMoments, setCriticalMoments] = useState<CriticalMomentType[]>([]);
-  const [currentFrame, setCurrentFrame] = useState(0);
+  const [emotionData, setEmotionData] = useState<EmotionDataPoint[]>(session.emotionData || []);
+  const [criticalMoments, setCriticalMoments] = useState<CriticalMomentType[]>(session.criticalMoments || []);
+  const [currentFrame, setCurrentFrame] = useState(
+    session.emotionData?.length ? session.emotionData[session.emotionData.length - 1].time : 0,
+  );
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
-  const [selectedEmotion, setSelectedEmotion] = useState<EmotionType>("Happy");
+  const [selectedEmotion, setSelectedEmotion] = useState<EmotionType>("All");
   const [isRecording, setIsRecording] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [chartAnimationSeed, setChartAnimationSeed] = useState(0);
 
-  // Calculate dynamic x-axis domain based on elapsed time
-  const xAxisDomain = useMemo(() => {
-    const maxTime = Math.max(currentFrame, 10);
-    
-    if (maxTime <= 10) {
-      return [0, 10]; // First 10 seconds: show 0-10s
-    } else if (maxTime <= 30) {
-      return [0, 30]; // 10-30 seconds: expand to 30s
-    } else if (maxTime <= 60) {
-      return [0, 60]; // 30-60 seconds: expand to 1 minute
-    } else {
-      // Beyond 60 seconds: show last minute with some padding
-      return [Math.max(0, maxTime - 60), maxTime + 10];
-    }
-  }, [currentFrame]);
-
-  // Poll Firebase every second for new frame data using frame_{n} syntax
   useEffect(() => {
-    let timeoutId: NodeJS.Timeout;
-    let isCancelled = false;
-
-    const pollNextFrame = async (frameNum: number) => {
-      if (isCancelled || !isRecording) return;
-      try {
-        console.debug('[LiveSession] Polling frame', frameNum, 'for video', session.videoId || session.id);
-        const frameData = await getFirebaseFrame(session.videoId || session.id, frameNum);
-
-        if (frameData && frameData.detections && frameData.detections.length > 0) {
-          const detection = frameData.detections[0];
-          const emotions = detection.emotion_scores;
-
-          const chartData: EmotionDataPoint = {
-            time: frameNum,
-            Angry: emotions.anger || 0,
-            Disgust: emotions.disgust || 0,
-            Fear: emotions.fear || 0,
-            Happy: emotions.happiness || 0,
-            Sad: emotions.sadness || 0,
-            Surprise: emotions.surprise || 0,
-            Neutral: emotions.neutral || 0,
-          };
-          const emotionValues = [
-            { name: 'Angry', value: chartData.Angry },
-            { name: 'Disgust', value: chartData.Disgust },
-            { name: 'Fear', value: chartData.Fear },
-            { name: 'Happy', value: chartData.Happy },
-            { name: 'Sad', value: chartData.Sad },
-            { name: 'Surprise', value: chartData.Surprise },
-            { name: 'Neutral', value: chartData.Neutral },
-          ];
-          const dominant = emotionValues.reduce((max, curr) => curr.value > max.value ? curr : max);
-          chartData.dominant = dominant.name;
-          chartData.dominantValue = dominant.value;
-          setEmotionData(prev => [...prev, chartData]);
-          setCurrentFrame(frameNum);
-        }
-      } catch (err) {
-        console.error(`Error fetching frame ${frameNum}:`, err);
-      }
-
-      if (!isCancelled && isRecording) {
-        timeoutId = setTimeout(() => pollNextFrame(frameNum + 1), 1000);
-      }
-    };
-
-    if (isRecording && (session.videoId || session.id)) {
-      console.debug('[LiveSession] Starting poll loop at frame', currentFrame + 1);
-      pollNextFrame(currentFrame + 1);
+    setEmotionData(session.emotionData || []);
+    setCriticalMoments(session.criticalMoments || []);
+    if (session.emotionData?.length) {
+      setCurrentFrame(session.emotionData[session.emotionData.length - 1].time);
+      setHasStarted(true);
     }
+  }, [session]);
 
-    return () => {
-      isCancelled = true;
-      clearTimeout(timeoutId);
+  useEffect(() => {
+    if (!isRecording) return;
+    let cancelled = false;
+
+    const tick = async () => {
+      const detail = await getSessionByIdFromApi(session.id);
+      if (!detail || cancelled) return;
+      setEmotionData(detail.emotionData || []);
+      setCriticalMoments(detail.criticalMoments || []);
+      if (detail.emotionData?.length) {
+        setCurrentFrame(detail.emotionData[detail.emotionData.length - 1].time);
+      }
     };
-  }, [isRecording, session.videoId, session.id, currentFrame]);
 
-  // Detect critical moments locally (simple peak detection)
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isRecording, session.id]);
+
   useEffect(() => {
     if (emotionData.length > 5) {
       const moments: CriticalMomentType[] = [];
@@ -140,13 +114,17 @@ export function LiveSession({ session, onEndSession }: LiveSessionProps) {
         const curr = emotionData[i];
         const prev = emotionData[i - 1];
         const next = emotionData[i + 1];
-        Object.keys(curr).forEach((emotion) => {
-          if (emotion === 'time' || emotion === 'dominant' || emotion === 'dominantValue') return;
-          const c = curr[emotion as keyof EmotionDataPoint] as number;
-          const p = (prev[emotion as keyof EmotionDataPoint] as number) || 0;
-          const n = (next[emotion as keyof EmotionDataPoint] as number) || 0;
+        EMOTION_KEYS.forEach((emotion) => {
+          const c = curr[emotion];
+          const p = prev[emotion] || 0;
+          const n = next[emotion] || 0;
           if (c > p && c > n && c > 0.6) {
-            moments.push({ time: curr.time, emotion, intensity: c, description: `${emotion} spike detected` });
+            moments.push({
+              time: curr.time,
+              emotion,
+              intensity: c,
+              description: `${emotion} spike detected`,
+            });
           }
         });
       }
@@ -154,44 +132,62 @@ export function LiveSession({ session, onEndSession }: LiveSessionProps) {
     }
   }, [emotionData]);
 
-  const handleStartRecording = () => {
-    setHasStarted(true);
-    setIsRecording(true);
-  };
+  const xAxisDomain = useMemo<[number, number]>(() => {
+    const maxTime = Math.max(currentFrame, 10);
+    if (maxTime <= 10) return [0, 10];
+    if (maxTime <= 30) return [0, 30];
+    if (maxTime <= 60) return [0, 60];
+    return [Math.max(0, maxTime - 60), maxTime + 10];
+  }, [currentFrame]);
 
-  const handleEndSession = () => {
+  const handleStartRecording = useCallback(async () => {
+    if (isRecording || isStarting) return;
+    setIsStarting(true);
+    try {
+      await startRemoteSession(session.id);
+      setHasStarted(true);
+      setIsRecording(true);
+      setChartAnimationSeed((seed) => seed + 1);
+    } catch (error) {
+      console.error("Failed to start session", error);
+      alert("Unable to start recording. Please try again.");
+    } finally {
+      setIsStarting(false);
+    }
+  }, [isRecording, isStarting, session.id]);
+
+  const handleEndSession = useCallback(() => {
     setIsRecording(false);
     onEndSession(emotionData, criticalMoments);
-  };
+  }, [emotionData, criticalMoments, onEndSession]);
 
-  const getEmotionAtTime = (timeInSeconds: number, emotion: EmotionType) => {
-    if (emotion === "All") return "N/A";
-    
-    const dataPoint = emotionData.find(d => d.time === timeInSeconds);
-    if (dataPoint) return dataPoint[emotion].toFixed(3);
-    
-    const before = emotionData.filter(d => d.time <= timeInSeconds).slice(-1)[0];
-    const after = emotionData.find(d => d.time > timeInSeconds);
-    
-    if (before && after) {
-      const ratio = (timeInSeconds - before.time) / (after.time - before.time);
-      const interpolated = before[emotion] + (after[emotion] - before[emotion]) * ratio;
-      return interpolated.toFixed(3);
-    }
-    
-    return before?.[emotion].toFixed(3) || "N/A";
-  };
+  const handleChartHover = useCallback(() => {
+    setChartAnimationSeed((seed) => seed + 1);
+  }, []);
+
+  const chartData = emotionData.length
+    ? emotionData
+    : [{
+        time: 0,
+        Happy: 0,
+        Sad: 0,
+        Angry: 0,
+        Fear: 0,
+        Surprise: 0,
+        Disgust: 0,
+        Neutral: 0,
+      }];
 
   return (
     <div className="min-h-screen bg-white">
-      {/* Header */}
       <header className="border-b border-gray-200 px-8 py-6">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 style={{ fontSize: "18px", fontWeight: 600 }}>{session.name}</h2>
             {isRecording && (
-              <span className="px-2 py-1 rounded-md bg-red-100 text-red-700 text-xs font-medium" data-testid="recording-indicator">
-                ● RECORDING
+              <span className="flex items-center gap-2 rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600" data-testid="recording-indicator">
+                <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse"></span>
+                Recording
               </span>
             )}
           </div>
@@ -200,8 +196,10 @@ export function LiveSession({ session, onEndSession }: LiveSessionProps) {
               <Button
                 onClick={handleStartRecording}
                 data-testid="button-start-recording"
-                className="bg-green-600 hover:bg-green-700 text-white"
+                className="bg-green-600 hover:bg-green-700 text-white flex items-center gap-2"
+                disabled={isStarting}
               >
+                {isStarting && <span className="h-2 w-2 rounded-full bg-white animate-ping"></span>}
                 Start Recording
               </Button>
             ) : (
@@ -218,227 +216,125 @@ export function LiveSession({ session, onEndSession }: LiveSessionProps) {
         </div>
       </header>
 
-      {/* Main Section */}
       <main className="px-8 py-12 max-w-7xl mx-auto">
         <div className="grid grid-cols-1 gap-8">
-          {/* Emotion Chart */}
           <Card className="p-8" style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}>
-            <div className="mb-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 style={{ fontSize: "18px", fontWeight: 600 }}>
-                  {selectedEmotion === "All" ? "All Emotions Over Time" : `${selectedEmotion} Over Time`}
-                </h3>
-                {selectedTime !== null && selectedEmotion !== "All" && (
-                  <div className="text-sm text-muted-foreground">
-                    {selectedTime}s • {getEmotionAtTime(selectedTime, selectedEmotion)}
-                  </div>
-                )}
+            <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h3 style={{ fontSize: "18px", fontWeight: 600 }}>Emotion Telemetry</h3>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Live confidence scores update every second during recording.
+                </p>
               </div>
-              
-              {/* Emotion Filter Buttons */}
-              <div className="flex flex-wrap gap-1.5">
-                {(["All", "Happy", "Sad", "Angry", "Fear", "Surprise", "Disgust", "Neutral"] as EmotionType[]).map((emotion) => (
-                  <button
+              <div className="flex gap-2 flex-wrap">
+                {(["All", ...EMOTION_KEYS] as EmotionType[]).map((emotion) => (
+                  <Button
                     key={emotion}
+                    size="sm"
+                    variant={selectedEmotion === emotion ? "default" : "outline"}
                     onClick={() => setSelectedEmotion(emotion)}
-                    data-testid={`button-emotion-${emotion.toLowerCase()}`}
-                    className={`px-3 py-1.5 rounded-md border transition-all duration-120 focus:outline-none focus:ring-2 focus:ring-black/80 ${
-                      selectedEmotion === emotion
-                        ? "bg-gray-900 text-white border-gray-900"
-                        : "border-gray-200 hover:bg-gray-50 hover:border-gray-300"
-                    }`}
-                    style={{ fontSize: "13px" }}
                   >
                     {emotion}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
 
-            <div className="h-80">
+            <div className="h-80" onMouseEnter={handleChartHover}>
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={emotionData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                <LineChart
+                  data={chartData}
+                  margin={{ top: 20, right: 40, left: 0, bottom: 0 }}
+                  key={chartAnimationSeed}
+                  onMouseMove={(state) => setSelectedTime(state?.activeLabel ?? null)}
+                  onMouseLeave={() => setSelectedTime(null)}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                   <XAxis
-                    type="number"
                     dataKey="time"
                     domain={xAxisDomain}
-                    stroke="#94a3b8"
-                    style={{ fontSize: "12px" }}
                     tickFormatter={(value) => `${value}s`}
                   />
-                  <YAxis
-                    domain={[0, 1]}
-                    stroke="#94a3b8"
-                    style={{ fontSize: "12px" }}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "white",
-                      border: "1px solid #e2e8f0",
-                      borderRadius: "8px",
-                    }}
-                    labelFormatter={(value) => `${value}s`}
-                    formatter={(value: number) => value.toFixed(3)}
-                  />
+                  <YAxis domain={[0, 1]} tickFormatter={(value) => value.toFixed(1)} />
+                  <Tooltip formatter={(value: number) => value.toFixed(3)} labelFormatter={(value) => `${value}s`} />
                   {selectedTime !== null && (
                     <ReferenceLine
                       x={selectedTime}
-                      stroke="#9ca3af"
-                      strokeWidth={2}
+                      stroke="#94a3b8"
                       strokeDasharray="4 4"
-                      label={{
-                        value: `${selectedTime}s`,
-                        position: "top",
-                        fill: "#6b7280",
-                        fontSize: 12,
-                      }}
+                      label={{ value: `${selectedTime}s`, position: "top", fill: "#6b7280", fontSize: 12 }}
                     />
                   )}
-                  
-                  {selectedEmotion === "All" ? (
-                    <>
-                      <Line 
-                        type="monotone" 
-                        dataKey="Happy" 
-                        stroke={EMOTION_COLORS.Happy} 
-                        strokeWidth={2} 
-                        dot={(props: any) => {
-                          if (props.index === emotionData.length - 1 && isRecording) {
-                            return <PulsingDot {...props} fill={EMOTION_COLORS.Happy} />;
+                  {selectedEmotion === "All"
+                    ? EMOTION_KEYS.map((emotion) => (
+                        <Line
+                          key={emotion}
+                          type="monotone"
+                          dataKey={emotion}
+                          stroke={EMOTION_COLORS[emotion]}
+                          strokeWidth={2}
+                          dot={(props: any) =>
+                            props.index === emotionData.length - 1 && isRecording ? (
+                              <PulsingDot {...props} fill={EMOTION_COLORS[emotion]} />
+                            ) : null
                           }
-                          return <></>;
-                        }}
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="Sad" 
-                        stroke={EMOTION_COLORS.Sad} 
-                        strokeWidth={2} 
-                        dot={(props: any) => {
-                          if (props.index === emotionData.length - 1 && isRecording) {
-                            return <PulsingDot {...props} fill={EMOTION_COLORS.Sad} />;
+                          isAnimationActive
+                          animationId={chartAnimationSeed}
+                        />
+                      ))
+                    : (
+                        <Line
+                          type="monotone"
+                          dataKey={selectedEmotion}
+                          stroke={EMOTION_COLORS[selectedEmotion]}
+                          strokeWidth={3}
+                          dot={(props: any) =>
+                            props.index === emotionData.length - 1 && isRecording ? (
+                              <PulsingDot {...props} fill={EMOTION_COLORS[selectedEmotion]} />
+                            ) : null
                           }
-                          return <></>;
-                        }}
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="Angry" 
-                        stroke={EMOTION_COLORS.Angry} 
-                        strokeWidth={2} 
-                        dot={(props: any) => {
-                          if (props.index === emotionData.length - 1 && isRecording) {
-                            return <PulsingDot {...props} fill={EMOTION_COLORS.Angry} />;
-                          }
-                          return <></>;
-                        }}
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="Fear" 
-                        stroke={EMOTION_COLORS.Fear} 
-                        strokeWidth={2} 
-                        dot={(props: any) => {
-                          if (props.index === emotionData.length - 1 && isRecording) {
-                            return <PulsingDot {...props} fill={EMOTION_COLORS.Fear} />;
-                          }
-                          return <></>;
-                        }}
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="Surprise" 
-                        stroke={EMOTION_COLORS.Surprise} 
-                        strokeWidth={2} 
-                        dot={(props: any) => {
-                          if (props.index === emotionData.length - 1 && isRecording) {
-                            return <PulsingDot {...props} fill={EMOTION_COLORS.Surprise} />;
-                          }
-                          return <></>;
-                        }}
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="Disgust" 
-                        stroke={EMOTION_COLORS.Disgust} 
-                        strokeWidth={2} 
-                        dot={(props: any) => {
-                          if (props.index === emotionData.length - 1 && isRecording) {
-                            return <PulsingDot {...props} fill={EMOTION_COLORS.Disgust} />;
-                          }
-                          return <></>;
-                        }}
-                      />
-                      <Line 
-                        type="monotone" 
-                        dataKey="Neutral" 
-                        stroke={EMOTION_COLORS.Neutral} 
-                        strokeWidth={2} 
-                        dot={(props: any) => {
-                          if (props.index === emotionData.length - 1 && isRecording) {
-                            return <PulsingDot {...props} fill={EMOTION_COLORS.Neutral} />;
-                          }
-                          return <></>;
-                        }}
-                      />
-                    </>
-                  ) : (
-                    <Line
-                      type="monotone"
-                      dataKey={selectedEmotion}
-                      stroke={EMOTION_COLORS[selectedEmotion]}
-                      strokeWidth={2}
-                      dot={(props: any) => {
-                        if (props.index === emotionData.length - 1 && isRecording) {
-                          return <PulsingDot {...props} fill={EMOTION_COLORS[selectedEmotion]} />;
-                        }
-                        return <></>;
-                      }}
-                    />
-                  )}
+                          isAnimationActive
+                          animationId={chartAnimationSeed}
+                        />
+                      )}
                 </LineChart>
               </ResponsiveContainer>
             </div>
 
-            {/* Legend */}
             <div className="mt-6 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
               {selectedEmotion === "All" ? (
-                <>
-                  {(Object.keys(EMOTION_COLORS) as Array<keyof typeof EMOTION_COLORS>).map((emotion) => (
-                    <span key={emotion} className="flex items-center gap-2">
-                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: EMOTION_COLORS[emotion] }}></div>
-                      {emotion}
-                    </span>
-                  ))}
-                </>
+                EMOTION_KEYS.map((emotion) => (
+                  <span key={emotion} className="flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full" style={{ backgroundColor: EMOTION_COLORS[emotion] }}></span>
+                    {emotion}
+                  </span>
+                ))
               ) : (
                 <span className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: EMOTION_COLORS[selectedEmotion] }}></div>
-                  Current: {emotionData.length > 0 ? emotionData[emotionData.length - 1][selectedEmotion].toFixed(3) : "N/A"}
+                  <span className="w-3 h-3 rounded-full" style={{ backgroundColor: EMOTION_COLORS[selectedEmotion] }}></span>
+                  Current confidence: {emotionData.length > 0 ? emotionData[emotionData.length - 1][selectedEmotion].toFixed(3) : "N/A"}
                 </span>
               )}
             </div>
           </Card>
 
-          {/* Critical Moments */}
           {criticalMoments.length > 0 && (
             <Card className="p-6" style={{ boxShadow: "0px 2px 8px rgba(0,0,0,0.06)" }}>
               <h3 className="mb-4" style={{ fontSize: "18px", fontWeight: 600 }}>Critical Moments</h3>
               <div className="space-y-3">
                 {criticalMoments.slice(-5).map((moment, idx) => (
-                  <div 
+                  <button
                     key={idx}
                     onClick={() => setSelectedTime(moment.time)}
-                    className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-all"
+                    className="flex w-full items-center gap-3 rounded-lg border border-gray-200 p-3 text-left transition-all hover:bg-gray-50"
                     data-testid={`critical-moment-${idx}`}
                   >
-                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: EMOTION_COLORS[moment.emotion as keyof typeof EMOTION_COLORS] }}></div>
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: EMOTION_COLORS[moment.emotion as Exclude<EmotionType, "All">] ?? "#94a3b8" }}></span>
                     <div className="flex-1">
-                      <p className="text-sm font-medium">{moment.emotion} spike at {moment.time}s</p>
+                      <p className="text-sm font-medium">{moment.emotion} spike • {moment.time}s</p>
                       <p className="text-xs text-muted-foreground">Intensity: {moment.intensity.toFixed(2)}</p>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </Card>

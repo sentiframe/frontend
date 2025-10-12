@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { queryClient } from "@/lib/queryClient";
-import { listSessionsFromFirebase, updateSessionMeta } from "@/lib/sessions";
+import { listSessionsFromApi, updateSessionMeta, deleteSessionLocally } from "@/lib/sessions";
 import type { Session } from "@shared/schema";
 
 interface SessionDashboardProps {
@@ -37,7 +37,7 @@ export function SessionDashboard({ onStartSession, onOpenSession }: SessionDashb
   // Fetch sessions
   const { data: sessions = [], isLoading } = useQuery<Session[]>({
     queryKey: ["sessions"],
-    queryFn: listSessionsFromFirebase,
+    queryFn: listSessionsFromApi,
   });
 
   useEffect(() => {
@@ -52,7 +52,7 @@ export function SessionDashboard({ onStartSession, onOpenSession }: SessionDashb
   // Delete session mutation
   const deleteMutation = useMutation({
     mutationFn: async (sessionId: string) => {
-      updateSessionMeta(sessionId, { deleted: true });
+      await deleteSessionLocally(sessionId);
       return { success: true };
     },
     onSuccess: () => {
@@ -74,7 +74,7 @@ export function SessionDashboard({ onStartSession, onOpenSession }: SessionDashb
   // Rename session mutation
   const renameMutation = useMutation({
     mutationFn: async ({ sessionId, name }: { sessionId: string; name: string }) => {
-      updateSessionMeta(sessionId, { name });
+      updateSessionMeta(sessionId, { displayName: name });
       return { success: true };
     },
     onSuccess: () => {

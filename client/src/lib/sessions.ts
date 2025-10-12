@@ -1,14 +1,37 @@
-import type { Session, EmotionDataPoint } from "@shared/schema";
-import { getAllVideos, getAllFrames, getVideoIdsFromFrames } from "@/lib/firebase";
+import { ngrokFetch } from "@/lib/queryClient";
+import type { Session, EmotionDataPoint, CriticalMomentType } from "@shared/schema";
 
 type SessionMeta = {
-  name?: string;
+  displayName?: string;
   isFavorite?: boolean;
   deleted?: boolean;
   createdAt?: number;
 };
 
 const META_KEY = "sessionsMeta";
+
+interface BackendSessionSummary {
+  session_id: string;
+  name?: string;
+  status?: string;
+  created_at?: string;
+  metadata?: Record<string, unknown> | null;
+  duration?: number;
+}
+
+interface BackendSessionDetail extends BackendSessionSummary {
+  emotion_data?: unknown[];
+  critical_moments?: Array<{
+    time: number;
+    emotion: string;
+    intensity?: number;
+    description?: string;
+  }>;
+  ai_report?: {
+    summary?: string;
+    suggestions?: string[];
+  };
+}
 
 function readMeta(): Record<string, SessionMeta> {
   try {
@@ -22,100 +45,165 @@ function writeMeta(meta: Record<string, SessionMeta>) {
   localStorage.setItem(META_KEY, JSON.stringify(meta));
 }
 
-export function updateSessionMeta(videoId: string, patch: Partial<SessionMeta>) {
+export function updateSessionMeta(sessionId: string, patch: Partial<SessionMeta>) {
   const meta = readMeta();
-  meta[videoId] = { ...(meta[videoId] || {}), ...patch };
+  meta[sessionId] = { ...(meta[sessionId] || {}), ...patch };
   writeMeta(meta);
 }
 
-export async function listSessionsFromFirebase(): Promise<Session[]> {
-  const videos = await getAllVideos();
-  const meta = readMeta();
+function ensureArray<T>(value: unknown): T[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value as T[];
+  return [];
+}
 
-  const sessions: Session[] = [];
-
-  if (videos.length > 0) {
-    for (const v of videos) {
-      const m = meta[v.id] || {};
-      if (m.deleted) continue;
-
-      const timestamp = m.createdAt || Date.now();
-      const dateObj = new Date(timestamp);
-
-      sessions.push({
-        id: v.id,
-        name: m.name || v.name || `Session ${v.id}`,
-        date: dateObj.toLocaleDateString(),
-        time: dateObj.toLocaleTimeString(),
-        duration: typeof v.frameCount === "number" ? v.frameCount : 0,
-        isFavorite: !!m.isFavorite,
-        videoId: v.id,
-        emotionData: [],
-      });
+function toEmotionDataPoint(raw: any, index: number): EmotionDataPoint {
+  const baseTime = typeof raw?.time === "number" ? raw.time : index;
+  const mapValue = (key: string) => {
+    if (raw && typeof raw === "object") {
+      if (typeof raw[key] === "number") return raw[key];
+      if (raw.emotions && typeof raw.emotions[key] === "number") return raw.emotions[key];
     }
-  } else {
-    const videoIds = await getVideoIdsFromFrames();
-    for (const id of videoIds) {
-      const m = meta[id] || {};
-      if (m.deleted) continue;
-      const timestamp = m.createdAt || Date.now();
-      const dateObj = new Date(timestamp);
-      const frames = await getAllFrames(id);
-      const approxDuration = frames.length ? frames[frames.length - 1].frameNumber : 0;
-      sessions.push({
-        id,
-        name: m.name || `Session ${id}`,
-        date: dateObj.toLocaleDateString(),
-        time: dateObj.toLocaleTimeString(),
-        duration: approxDuration,
-        isFavorite: !!m.isFavorite,
-        videoId: id,
-        emotionData: [],
-      });
-    }
+    return 0;
+  };
+  const point: EmotionDataPoint = {
+    time: baseTime,
+    Happy: mapValue("Happy") || mapValue("happy"),
+    Sad: mapValue("Sad") || mapValue("sad"),
+    Angry: mapValue("Angry") || mapValue("angry"),
+    Fear: mapValue("Fear") || mapValue("fear"),
+    Surprise: mapValue("Surprise") || mapValue("surprise"),
+    Disgust: mapValue("Disgust") || mapValue("disgust"),
+    Neutral: mapValue("Neutral") || mapValue("neutral"),
+  };
+  const entries = Object.entries(point).filter(([key]) => key !== "time") as Array<[keyof EmotionDataPoint, number]>;
+  const dominant = entries.reduce((prev, curr) => (curr[1] > prev[1] ? curr : prev));
+  point.dominant = dominant[0];
+  point.dominantValue = dominant[1];
+  return point;
+}
+
+function normalizeCriticalMoments(raw: BackendSessionDetail["critical_moments"]): CriticalMomentType[] {
+  return ensureArray(raw).map((moment) => ({
+    time: typeof moment.time === "number" ? moment.time : 0,
+    emotion: moment.emotion || "Unknown",
+    intensity: typeof moment.intensity === "number" ? moment.intensity : 0,
+    description: moment.description || `${moment.emotion || "Emotion"} fluctuation`,
+  }));
+}
+
+function computeDisplayTimestamp(createdAt?: string | number): { date: string; time: string } {
+  const numeric = typeof createdAt === "number" ? createdAt : undefined;
+  const candidate =
+    typeof createdAt === "string" && !Number.isNaN(Date.parse(createdAt))
+      ? new Date(createdAt)
+      : typeof numeric === "number" && Number.isFinite(numeric)
+      ? new Date(numeric)
+      : new Date();
+  return {
+    date: candidate.toLocaleDateString(),
+    time: candidate.toLocaleTimeString(),
+  };
+}
+
+function baseSessionFromSummary(summary: BackendSessionSummary, meta: SessionMeta | undefined): Session {
+  const timestamp = summary.created_at ? Date.parse(summary.created_at) : meta?.createdAt;
+  const { date, time } = computeDisplayTimestamp(Number.isFinite(timestamp) ? timestamp : meta?.createdAt);
+  return {
+    id: summary.session_id,
+    name: meta?.displayName || summary.name || summary.metadata?.name?.toString() || summary.session_id,
+    date,
+    time,
+    duration: typeof summary.duration === "number" ? summary.duration : 0,
+    isFavorite: !!meta?.isFavorite,
+    videoId: summary.session_id,
+    emotionData: [],
+  };
+}
+
+function sessionFromDetail(detail: BackendSessionDetail, meta: SessionMeta | undefined): Session {
+  const base = baseSessionFromSummary(detail, meta);
+  const emotionData = ensureArray(detail.emotion_data).map(toEmotionDataPoint);
+  const duration = detail.duration ?? (emotionData.length ? emotionData[emotionData.length - 1].time : base.duration);
+  return {
+    ...base,
+    duration,
+    emotionData,
+    criticalMoments: normalizeCriticalMoments(detail.critical_moments),
+    aiReport: detail.ai_report?.summary
+      ? {
+          summary: detail.ai_report.summary,
+          suggestions: ensureArray<string>(detail.ai_report.suggestions),
+        }
+      : undefined,
+  };
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await ngrokFetch(path, init);
+  if (res.status === 204) {
+    return undefined as T;
   }
+  return res.json() as Promise<T>;
+}
+
+export async function createSession(name: string, metadata: Record<string, unknown> = {}): Promise<Session> {
+  const body = JSON.stringify({ name, metadata });
+  const summary = await fetchJson<BackendSessionSummary>("/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const meta = readMeta();
+  meta[summary.session_id] = {
+    ...(meta[summary.session_id] || {}),
+    displayName: name,
+    createdAt: summary.created_at ? Date.parse(summary.created_at) : Date.now(),
+  };
+  writeMeta(meta);
+  return baseSessionFromSummary(summary, meta[summary.session_id]);
+}
+
+export async function startSession(sessionId: string): Promise<void> {
+  await fetchJson("/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+export async function stopSession(sessionId: string): Promise<void> {
+  await fetchJson("/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+export async function listSessionsFromApi(): Promise<Session[]> {
+  const summaries = await fetchJson<BackendSessionSummary[]>("/sessions");
+  const meta = readMeta();
+  const sessions = ensureArray<BackendSessionSummary>(summaries)
+    .filter((summary) => !(meta[summary.session_id]?.deleted))
+    .map((summary) => baseSessionFromSummary(summary, meta[summary.session_id]));
 
   sessions.sort((a, b) => new Date(`${b.date} ${b.time}`).getTime() - new Date(`${a.date} ${a.time}`).getTime());
   return sessions;
 }
 
-export async function getSessionByIdFromFirebase(sessionId: string): Promise<Session | null> {
-  const sessions = await listSessionsFromFirebase();
-  const base = sessions.find((s) => s.id === sessionId);
-  if (!base) return null;
+export async function getSessionByIdFromApi(sessionId: string): Promise<Session | null> {
+  try {
+    const detail = await fetchJson<BackendSessionDetail>(`/session/${sessionId}`);
+    const meta = readMeta()[sessionId];
+    return sessionFromDetail(detail, meta);
+  } catch (error) {
+    console.error("Failed to fetch session detail", error);
+    return null;
+  }
+}
 
-  const frames = await getAllFrames(base.videoId || base.id);
-  const emotionData: EmotionDataPoint[] = frames.map((f, index) => {
-    const detection = f.data.detections?.[0];
-    if (!detection) {
-      return {
-        time: index,
-        Angry: 0,
-        Disgust: 0,
-        Fear: 0,
-        Happy: 0,
-        Sad: 0,
-        Surprise: 0,
-        Neutral: 0,
-      };
-    }
-    return {
-      time: index,
-      Angry: detection.emotion_scores.anger || 0,
-      Disgust: detection.emotion_scores.disgust || 0,
-      Fear: detection.emotion_scores.fear || 0,
-      Happy: detection.emotion_scores.happiness || 0,
-      Sad: detection.emotion_scores.sadness || 0,
-      Surprise: detection.emotion_scores.surprise || 0,
-      Neutral: detection.emotion_scores.neutral || 0,
-    };
-  });
-
-  const duration = emotionData.length > 0 ? emotionData[emotionData.length - 1].time : base.duration;
-
-  return {
-    ...base,
-    duration,
-    emotionData,
-  };
+export async function deleteSessionLocally(sessionId: string): Promise<void> {
+  const meta = readMeta();
+  meta[sessionId] = { ...(meta[sessionId] || {}), deleted: true };
+  writeMeta(meta);
 }
