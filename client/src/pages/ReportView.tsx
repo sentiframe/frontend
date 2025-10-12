@@ -60,50 +60,58 @@ interface SummaryResponse {
   generated_at?: string;
 }
 
-/** ---------- NGROK CONFIG ---------- */
-const API_BASE =
-  (import.meta as any)?.env?.VITE_NGROK_BASE_URL ||
-  "https://7782ac3462c8.ngrok-free.app";
+/** ---------- NGROK/PROXY CONFIG ---------- */
+// Leave blank so fetches hit the Vite dev server (localhost), which proxies to ngrok.
+const API_BASE = (import.meta as any)?.env?.VITE_API_BASE ?? "";
 
 /** Join base + path safely */
 function joinUrl(base: string, path: string) {
-  if (!path) return base;
-  try {
-    const u = new URL(path);
-    return u.toString(); // already absolute
-  } catch {
-    const b = base.endsWith("/") ? base.slice(0, -1) : base;
-    const p = path.startsWith("/") ? path : `/${path}`;
-    return `${b}${p}`;
-  }
+  if (!path) return base || "/";
+  // If path is absolute URL, return as-is
+  try { return new URL(path).toString(); } catch {}
+  if (!base) return path.startsWith("/") ? path : `/${path}`;
+  const b = base.endsWith("/") ? base.slice(0, -1) : base;
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${b}${p}`;
 }
+
+async function fetchSummary(sessionName: string): Promise<SummaryResponse> {
+  const url = joinUrl(API_BASE, `/api/summary/${encodeURIComponent(sessionName)}`);
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      "User-Agent": "ReadyAdmit-Dashboard/1.0",
+      "ngrok-skip-browser-warning": "true",
+    },
+    cache: "no-store",
+  });
+
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("text/html")) {
+    const text = await res.text();
+    throw new Error(
+      `Got HTML instead of JSON from ${url}.\n` +
+      `Proxy/path likely misconfigured or backend not responding correctly.`
+    );
+  }
+
+  if (res.status === 404) return { status: "not_found", session_name: sessionName };
+  if (!res.ok) throw new Error(`Backend error ${res.status}: ${res.statusText}`);
+
+  const data = await res.json().catch(() => {
+    throw new Error("Non-JSON response from backend.");
+  });
+  return data as SummaryResponse;
+}
+
+
 
 /** Common headers to skip ngrok warning */
 const NGROK_HEADERS: HeadersInit = {
   "ngrok-skip-browser-warning": "true",
 };
 
-/** Fetcher that hits ngrok backend */
-async function fetchSummary(sessionName: string): Promise<SummaryResponse> {
-  const url = joinUrl(API_BASE, `/api/summary/${encodeURIComponent(sessionName)}`);
-  const res = await fetch(url, {
-    method: "GET",
-    headers: NGROK_HEADERS,
-    cache: "no-store",
-  });
 
-  if (res.status === 404) {
-    return { status: "not_found", session_name: sessionName };
-  }
-
-  let data: any;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error("Non-JSON response — check ngrok or backend output.");
-  }
-  return data as SummaryResponse;
-}
 
 /** ---------- EXISTING TYPES/CONSTS ---------- */
 interface ReportViewProps {
@@ -224,13 +232,15 @@ export function ReportView({ session, onBackToDashboard, onDelete }: ReportViewP
   const [playingSrc, setPlayingSrc] = useState<string | null>(null);
 
   /** -------- Summary polling from backend -------- */
-  const query: UseQueryResult<SummaryResponse, Error> = useQuery<SummaryResponse, Error>({
-    queryKey: ["summary", session.name],
-    queryFn: () => fetchSummary(session.name),
-    // Poll while processing; stop when completed/error/not_found
-    refetchInterval: (data) => (data?.status === "processing" ? 2000 : false),
-    refetchOnWindowFocus: false,
-  });
+  const query = useQuery<SummaryResponse, Error>({
+  queryKey: ["summary", session.name],
+  queryFn: () => fetchSummary(session.name),
+  // ✅ The callback gets the Query, so read q.state.data
+  refetchInterval: (q) =>
+    q.state.data?.status === "processing" ? 2000 : false,
+  refetchOnWindowFocus: false,
+});
+
 
   const summaryData = query.data; // <-- this is the SummaryResponse (may be undefined initially)
   const isFetching = query.isFetching;

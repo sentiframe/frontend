@@ -6,7 +6,7 @@ const NGROK_BASE = ((import.meta as any).env?.VITE_NGROK_BASE_URL || "https://77
 function resolveNgrokPath(path: string): string {
   const normalized = path.startsWith("/") ? path : `/${path}`;
   if (import.meta.env?.DEV) {
-    return `/ngrok${normalized}`;
+    return `/api${normalized}`;
   }
   return `${NGROK_BASE}${normalized}`;
 }

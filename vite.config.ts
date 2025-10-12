@@ -37,11 +37,11 @@ export default defineConfig({
       deny: ["**/.*"],
     },
     proxy: {
-      "/ngrok": {
+      "/api": {
         target: process.env.VITE_NGROK_BASE_URL || "https://7782ac3462c8.ngrok-free.app/",
         changeOrigin: true,
         secure: false,
-        rewrite: (path) => path.replace(/^\/ngrok/, ""),
+        rewrite: (path) => path.replace(/^\/api/, ""),
       },
     },
   },
